@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light"><title>映读 · 视频阅读工作台</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <button class="icon-button mobile-menu" data-action="menu" aria-label="展开频道导航">☰</button>
+    <div class="brand"><span id="brand-icon" class="brand-icon" aria-hidden="true">▤</span><div><strong id="brand-name">映读</strong><span class="brand-sub">YOUTUBE READER</span></div></div>
+    <div class="header-note">让每一次观看，都有所留下。</div>
+    <div class="header-actions"><button class="button quiet" data-action="import-new"><span aria-hidden="true">↥</span> 导入文稿</button><button class="button primary" data-action="add-channel"><span aria-hidden="true">＋</span> 订阅频道</button></div>
+  </header>
+  <div id="global-error" class="global-error" role="alert" hidden></div>
+  <div class="app-body">
+    <aside class="sidebar" id="sidebar" aria-label="资料库导航">
+      <div class="section-label">我的资料库</div>
+      <nav id="library-nav"></nav>
+      <div class="channel-heading"><span class="section-label">订阅频道</span><button class="icon-button" data-action="add-channel" aria-label="添加订阅频道">＋</button></div>
+      <div id="channel-list" class="channel-list"></div>
+      <button class="sidebar-link" data-action="channels">管理频道 <span>↗</span></button>
+      <div class="sidebar-bottom"><div class="local-note"><span>◈</span> 资料只保存在本机</div><button id="connector-indicator" class="connector-indicator" data-action="settings"></button></div>
+    </aside>
+    <main class="workspace">
+      <section class="video-pane" aria-label="视频列表">
+        <div class="video-pane-head"><div><span class="eyebrow">YOUR WATCHLIST</span><h1 id="list-title">全部视频 <span id="list-count">0</span></h1></div><button class="icon-button" id="sync-button" data-action="sync" aria-label="立即检查频道更新" title="立即检查频道更新">↻</button></div>
+        <div class="search-box"><span aria-hidden="true">⌕</span><input id="video-search" type="search" placeholder="搜索视频或频道…" aria-label="搜索视频或频道"><kbd>/</kbd></div>
+        <div id="list-meta" class="list-meta"></div>
+        <div id="video-list" class="video-list"></div>
+        <div class="list-footer" id="list-footer">从订阅开始，建立你的阅读资料库</div>
+      </section>
+      <section id="reader" class="reader" aria-label="视频阅读工作区"></section>
+    </main>
+  </div>
+  <dialog id="app-dialog" aria-labelledby="dialog-title"><div id="dialog-body"></div></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

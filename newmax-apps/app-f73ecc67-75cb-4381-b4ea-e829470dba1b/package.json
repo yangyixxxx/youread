@@ -1,0 +1,14 @@
+{
+  "name": "yingdu-local-app",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "build:markdown": "esbuild node_modules/markdown-it/dist/markdown-it.mjs --bundle --format=esm --platform=browser --minify --legal-comments=eof --outfile=src/vendor/markdown-it.mjs"
+  },
+  "dependencies": {
+    "markdown-it": "15.0.2"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

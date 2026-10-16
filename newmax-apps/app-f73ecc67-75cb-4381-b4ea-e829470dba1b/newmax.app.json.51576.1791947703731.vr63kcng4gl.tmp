@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "id": "app-f73ecc67-75cb-4381-b4ea-e829470dba1b",
+  "name": "映读",
+  "icon": "symbol:menu_book:forest",
+  "version": "0.1.0",
+  "description": "订阅 YouTube 频道，将视频字幕变成可阅读、可解析、可对话的学习资料。",
+  "standard": {
+    "id": "newmax.local-app",
+    "version": "2026.09",
+    "runtimeApi": "^1.0.0",
+    "compatibility": "semver"
+  },
+  "builder": {
+    "status": "built",
+    "currentPhase": "snapshot",
+    "requirements": [
+      "输入 YouTube 频道，通过已授权的本地连接器定时同步近期视频并获取可用字幕。",
+      "支持字幕导入、检索、时间戳跳转、频道筛选、待读与收藏。",
+      "基于当前视频文稿，使用 NewMax 实时模型生成解析并开展有来源的阅读对话。",
+      "本地保存阅读进度、文稿、解析及对话；不自动调用付费 AI、不配置系统自启动。"
+    ],
+    "assumptions": [
+      "连接器运行时才执行定时更新，关闭连接器停止检查。",
+      "首次最多20条近期视频，每轮自动尝试最新3条新视频的字幕；受平台与网络可用性限制。",
+      "AI请求可能发送文稿给当前配置的云端模型并产生费用，仅明确点击后调用。"
+    ],
+    "acceptanceCriteria": [
+      "可以校验并添加频道、查看同步状态、手动刷新和取消订阅，重复输入不会产生重复频道。",
+      "本地连接器支持定时去重同步和可用字幕获取；真实网络受限时显示可恢复错误，不伪造视频或字幕。",
+      "可导入 SRT/VTT/TXT 文稿，显示时间戳，搜索文稿并跳转原视频；无字幕有导入入口。",
+      "视频可按频道、标题、未读和收藏筛选，阅读状态、导入内容和收藏在重载后保留。",
+      "解析与对话使用 NewMax 模型配置，按当前文稿构建上下文；具备重复提交保护、长文范围提示和错误恢复，不自动产生费用。",
+      "默认与窄窗口下主要控件可访问，空白/加载/错误/有内容状态清楚，品牌跟随应用设置。"
+    ],
+    "buildTrace": []
+  },
+  "runtime": "^1.0.0",
+  "entry": {
+    "frontend": "src/index.html"
+  },
+  "permissions": [
+    "ai.chat",
+    "data.kv",
+    "files.appData",
+    "notifications",
+    "desktopShortcut"
+  ],
+  "shortcuts": [
+    {
+      "surface": "newmax.sidebar",
+      "title": "映读",
+      "icon": "symbol:menu_book:forest"
+    }
+  ],
+  "createdAt": "2026-10-14T02:08:47.945Z",
+  "updatedAt": "2026-10-14T03:15:03.731Z"
+}

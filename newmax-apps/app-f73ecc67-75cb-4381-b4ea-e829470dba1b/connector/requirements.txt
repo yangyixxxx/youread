@@ -1,0 +1,2 @@
+# Verified local dependency; update explicitly, not on every launch.
+yt-dlp[default]==2026.8.19
