@@ -1,5 +1,5 @@
 import {escapeHTML as esc} from './core.mjs';
-import {articleSources,newArticle,validateArticle,layoutArticle,loadImage,normalizeUpload,renderArticlePage,pngBlob,zipFiles,downloadBlob,articleBlocks} from './editorial.mjs';
+import {articleSources,newArticle,validateArticle,layoutArticle,loadImage,normalizeUpload,renderArticlePage,pngBlob,zipFiles,downloadBlob,articleBlocks,prepareEditorialFonts} from './editorial.mjs';
 
 import {attachFramePicker} from './frame-picker.mjs';
 import {validFrameSource} from './frame-plan.mjs';
@@ -22,17 +22,19 @@ export async function openEditorial({sdk,video,record,transcript,brand,frameApi}
     <p class="ed-hint">只编辑排版副本，不会改动原解析或对话。载入不会重新生成。</p>
     <label class="ed-label" for="ed-title">文章标题</label><textarea id="ed-title" rows="2" placeholder="用一句完整的主张做标题"></textarea>
     <label class="ed-label" for="ed-byline">来源 / 署名</label><input id="ed-byline" placeholder="例如：频道名称 · 视频精读">
+    <label class="ed-label" for="ed-footer">页脚文字（图片左下角）</label><input id="ed-footer" placeholder="视频精读" aria-describedby="ed-footer-hint"><p class="ed-hint" id="ed-footer-hint">每页左下角同步显示，留空可隐藏自定义文字。过长时图片省略显示，输入原文仍完整保存；未完成等来源标记保留。</p>
     <div id="ed-source-status" class="ed-hint"></div>
     <label class="ed-label" for="ed-body">正文 <span>Markdown</span></label><textarea id="ed-body" rows="14" spellcheck="false" placeholder="在这里写下你的图文内容…"></textarea>
     <div class="ed-inline-actions"><button class="button quiet" data-ed="page-break">＋ 手动分页</button><button class="button quiet" data-ed="inline-image">＋ 正文配图</button><button type="button" class="button quiet" data-frame="toggle" aria-expanded="false" aria-controls="ed-frame-panel">从视频取图</button></div><section id="ed-frame-panel" class="ed-frame-panel" aria-label="视频截图候选" hidden></section><div id="ed-frame-assets" class="ed-frame-assets"></div>
     <p class="ed-hint">## 分节标题 · **重点** · 独立 --- 分页。表格转为带列名的逐行文字，代码折行；外链图片不自动加载。完整内容会续页，不裁掉尾文。图片自动隐藏时间引用，底稿与阅读页跳转不受影响。</p></section>
-    <section class="ed-section"><div class="ed-section-heading"><span>02</span><h3>纸面与配图</h3></div><div class="ed-controls"><label>页面比例<select id="ed-ratio"><option value="3:5">3:5 · 参考长页</option><option value="3:4">3:4 · 图文卡片</option><option value="9:16">9:16 · 竖屏</option></select></label><label>正文字号<select id="ed-font"><option value="36">36 · 紧凑</option><option value="40">40 · 标准</option><option value="44">44 · 大字</option></select></label></div>
+    <section class="ed-section"><div class="ed-section-heading"><span>02</span><h3>纸面与配图</h3></div><div class="ed-controls"><label>页面比例<select id="ed-ratio"><option value="3:4">3:4 · 小红书图文 · 1080×1440</option><option value="3:5">3:5 · 参考长页 · 1080×1800</option><option value="9:16">9:16 · 竖屏 · 1080×1920</option></select></label><label>正文字号<select id="ed-font"><option value="36">36 · 紧凑</option><option value="40">40 · 标准</option><option value="44">44 · 大字</option></select></label></div>
+    <p class="ed-hint">新排版默认 3:4 小红书图文；旧草稿保留已选比例，可在这里切换。长文自动增加页数，不压缩或裁掉正文。</p>
     <label class="ed-label" for="ed-paper">纸面</label><select id="ed-paper"><option value="texture">暖白纸纹</option><option value="plain">暖白纯色</option><option value="white">纯白</option></select>
     <label class="ed-auto-cover"><input id="ed-auto-cover" type="checkbox" checked> 无封面时自动获取视频封面</label>
     <div class="ed-inline-actions"><button class="button" data-ed="fetch-cover">获取视频封面</button><button class="button quiet" data-ed="cover">上传替换</button><button class="button quiet" data-ed="remove-cover" hidden>移除封面</button></div><img id="ed-cover-preview" class="ed-cover-preview" alt="当前图文封面" hidden><p id="ed-cover-state" class="ed-hint" role="status">封面显示在标题下方、正文之前。</p><p class="ed-hint">仅下载视频封面图片，不调用 AI；保存排版后可离线复用。已有封面不会自动覆盖。</p>
     <input id="ed-image-file" type="file" accept="image/png,image/jpeg,image/webp" hidden><p class="ed-hint">配图仅保存在本机。PNG / JPEG / WebP，单张 ≤10 MB。请使用有权使用的图片。视频截图请点击「从视频取图」，不会自动抓取书封。</p></section>
     </fieldset></aside>
-    <section class="ed-preview" aria-label="分页图片预览"><div class="ed-preview-toolbar"><div><strong id="ed-page-label">正在读取…</strong><span id="ed-dimensions">1080 × 1800 PNG</span></div><div class="ed-page-nav"><button class="button" data-ed="prev" aria-label="上一页" disabled>←</button><select id="ed-page-select" aria-label="选择预览页" disabled><option>1</option></select><button class="button" data-ed="next" aria-label="下一页" disabled>→</button></div></div>
+    <section class="ed-preview" aria-label="分页图片预览"><div class="ed-preview-toolbar"><div><strong id="ed-page-label">正在读取…</strong><span id="ed-dimensions">1080 × 1440 PNG</span></div><div class="ed-page-nav"><button class="button" data-ed="prev" aria-label="上一页" disabled>←</button><select id="ed-page-select" aria-label="选择预览页" disabled><option>1</option></select><button class="button" data-ed="next" aria-label="下一页" disabled>→</button></div></div>
     <div class="ed-stage" id="ed-stage"><div class="ed-empty">正在准备纸面…</div></div>
     <footer class="ed-export-bar"><span id="ed-preview-state" role="status">本地预览与导出使用同一画布</span><div><button class="button" data-ed="export-page" disabled>当前页 PNG</button><button class="button primary" data-ed="export-all" disabled>全部分页 ZIP ↓</button></div></footer></section></div>`;
   document.body.append(root);root.showModal();
@@ -57,9 +59,9 @@ export async function openEditorial({sdk,video,record,transcript,brand,frameApi}
     $('[data-ed="fetch-cover"]').disabled=busy||!ready||!coverAvailable||!!coverController;
     if(coverController)for(const action of ['save','cover','remove-cover','export-page','export-all'])$(`[data-ed="${action}"]`).disabled=true;
   }
-  function readFields(){if(!article)return;article.title=$('#ed-title').value;article.byline=$('#ed-byline').value;article.body=$('#ed-body').value;article.ratio=$('#ed-ratio').value;article.fontSize=Number($('#ed-font').value);article.paper=$('#ed-paper').value;}
+  function readFields(){if(!article)return;article.title=$('#ed-title').value;article.byline=$('#ed-byline').value;article.footerText=$('#ed-footer').value;article.body=$('#ed-body').value;article.ratio=$('#ed-ratio').value;article.fontSize=Number($('#ed-font').value);article.paper=$('#ed-paper').value;}
   function fillFields(){
-    $('#ed-title').value=article.title;$('#ed-byline').value=article.byline;$('#ed-body').value=article.body;$('#ed-ratio').value=article.ratio;$('#ed-font').value=article.fontSize;$('#ed-paper').value=article.paper;
+    $('#ed-title').value=article.title;$('#ed-byline').value=article.byline;$('#ed-footer').value=article.footerText;$('#ed-body').value=article.body;$('#ed-ratio').value=article.ratio;$('#ed-font').value=article.fontSize;$('#ed-paper').value=article.paper;
     if(sources.some(s=>s.id===article.sourceId))$('#ed-source').value=article.sourceId;
     $('#ed-source-status').textContent=article.sourceStatus?`来源标记：${article.sourceStatus}。该标记会出现在图片中。`:'';
     fillCover();
@@ -144,7 +146,7 @@ export async function openEditorial({sdk,video,record,transcript,brand,frameApi}
   }
   root.addEventListener('cancel',e=>{e.preventDefault();requestClose();});
   root.addEventListener('keydown',e=>{e.stopPropagation();if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();if(ready&&!busy&&!coverController)save();}});
-  root.addEventListener('input',e=>{if(['ed-title','ed-byline','ed-body'].includes(e.target.id))modified();});
+  root.addEventListener('input',e=>{if(['ed-title','ed-byline','ed-footer','ed-body'].includes(e.target.id))modified();});
   root.addEventListener('change',e=>{
     if(['ed-ratio','ed-font','ed-paper'].includes(e.target.id))modified();
     if(e.target.id==='ed-page-select'){page=Number(e.target.value);draw();$('#ed-stage').scrollTop=0;}
@@ -189,7 +191,7 @@ export async function openEditorial({sdk,video,record,transcript,brand,frameApi}
       images[id]=await loadImage(data.dataUrl);
     }
     try{texture=await loadImage(new URL('./assets/editorial-paper.png',import.meta.url).href);}catch{previewState('纸纹不可用，使用纯色纸面');}
-    await document.fonts.ready;if(!root.open)return;
+    await prepareEditorialFonts();await document.fonts.ready;if(!root.open)return;
     ready=true;busy=false;fillFields();frames.refresh();saveState(saved?'已恢复本地排版':'尚未保存 · 原内容的副本');controls();reflow();
     if(shouldFetchCover(video,article))void getCover();
   }catch(e){busy=false;ready=false;error(`读取失败：${e.message} 请关闭后重开；为保护原稿，保存和导出已暂停。`);saveState('读取失败');$('#ed-stage').textContent='原解析和排版草稿未改动。';controls();}

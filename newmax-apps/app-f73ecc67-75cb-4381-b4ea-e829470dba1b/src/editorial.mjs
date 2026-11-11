@@ -1,8 +1,25 @@
 import {markdownTokens} from './markdown.mjs';
+import {parseTimeCitation} from './time-citations.mjs';
 
 export const PAGE_WIDTH = 1080;
-export const PAGE_HEIGHTS = {'3:5':1800,'3:4':1440,'9:16':1920};
-export const SERIF = '"SimSun", "Songti SC", "Noto Serif CJK SC", serif';
+export const DEFAULT_PAGE_RATIO = '3:4';
+export const PAGE_HEIGHTS = {'3:4':1440,'3:5':1800,'9:16':1920};
+export const SERIF = '"Yingdu Editorial Serif", "Songti SC", "Noto Serif CJK SC", serif';
+const fontLoads = new WeakMap();
+export async function prepareEditorialFonts(fontSet=globalThis.document?.fonts,FontFaceClass=globalThis.FontFace){
+  if(!fontSet?.add||!FontFaceClass)throw new Error('当前环境无法加载本地宋体，预览和导出已暂停。');
+  let pending=fontLoads.get(fontSet);
+  if(!pending){
+    pending=(async()=>{
+      const face=new FontFaceClass('Yingdu Editorial Serif',`url("${new URL('./assets/editorial-font/NotoSerifSC.ttf',import.meta.url).href}")`,{style:'normal',weight:'200 900'});
+      try{await face.load();fontSet.add(face);return face;}
+      catch{throw new Error('本地宋体字库加载失败，预览和导出已暂停。请关闭后重新打开图文排版；原稿未改动。');}
+    })();
+    fontLoads.set(fontSet,pending);
+    pending.catch(()=>fontLoads.delete(fontSet));
+  }
+  return pending;
+}
 const SANS = '"Microsoft YaHei", "Segoe UI", sans-serif';
 const validAssetId = id => /^[a-zA-Z0-9-]+$/.test(id || '');
 
@@ -19,11 +36,11 @@ export function newArticle(video, source = {}) {
   const heading = body.match(/^# ([^\n]+)\n*/);
   const title = heading ? heading[1].replace(/\*\*/g,'').trim() : video.title;
   if(heading)body=body.slice(heading[0].length);
-  return {version:1,title:title||'未命名文章',byline:video.channelTitle||'视频阅读笔记',body,sourceId:source.id||'',sourceStatus:source.status||'',ratio:'3:5',fontSize:40,paper:'texture',coverId:'',assets:{}};
+  return {version:1,title:title||'未命名文章',byline:video.channelTitle||'视频阅读笔记',footerText:'视频精读',body,sourceId:source.id||'',sourceStatus:source.status||'',ratio:DEFAULT_PAGE_RATIO,fontSize:40,paper:'texture',coverId:'',assets:{}};
 }
 export function validateArticle(value) {
   if(!value || value.version!==1 || typeof value.title!=='string' || typeof value.body!=='string')throw new Error('排版草稿格式不正确，已暂停载入以保护原资料。');
-  return {...value,byline:String(value.byline||''),sourceStatus:String(value.sourceStatus||''),ratio:PAGE_HEIGHTS[value.ratio]?value.ratio:'3:5',fontSize:[36,40,44].includes(value.fontSize)?value.fontSize:40,paper:['texture','plain','white'].includes(value.paper)?value.paper:'plain',assets:value.assets&&typeof value.assets==='object'?value.assets:{}};
+  return {...value,byline:String(value.byline||''),footerText:typeof value.footerText==='string'?value.footerText:'视频精读',sourceStatus:String(value.sourceStatus||''),ratio:PAGE_HEIGHTS[value.ratio]?value.ratio:DEFAULT_PAGE_RATIO,fontSize:[36,40,44].includes(value.fontSize)?value.fontSize:40,paper:['texture','plain','white'].includes(value.paper)?value.paper:'plain',assets:value.assets&&typeof value.assets==='object'?value.assets:{}};
 }
 function inlineRuns(tokens = []) {
   const runs=[];let bold=0,italic=0,strike=0;
@@ -34,11 +51,7 @@ function inlineRuns(tokens = []) {
     if(t.type==='link_open'){
       const end=tokens.findIndex((child,j)=>j>i&&child.type==='link_close');
       const label=tokens.slice(i+1,end).map(child=>child.content||'').join('').trim();
-      const match=label.match(/^\[?((?:\d{1,3}:)?\d{1,2}:[0-5]\d)\]?$/);
-      if(end>i&&match){
-        const parts=match[1].split(':').map(Number);
-        if(parts.length===2||parts[1]<60){i=end;continue;}
-      }
+      if(end>i&&parseTimeCitation(label)){i=end;continue;}
     }
     if(t.type==='strong_open')bold++;
     else if(t.type==='strong_close')bold--;
@@ -92,7 +105,7 @@ export function articleBlocks(body) {
   }
   return blocks;
 }
-function font(size,run={}){return `${run.italic?'italic ':''}${run.heavy?'900':run.bold?'700':'400'} ${size}px ${run.code?'Consolas, monospace':SERIF}`;}
+function font(size,run={}){return `${run.italic?'italic ':''}${run.heavy?'800':run.bold?'700':'400'} ${size}px ${run.code?'Consolas, monospace':SERIF}`;}
 const graphemes=typeof Intl.Segmenter==='function'?new Intl.Segmenter('zh-CN',{granularity:'grapheme'}):null;
 export function wrapRuns(runs,maxWidth,size,measure){
   const lines=[];let line=[],width=0;
@@ -128,7 +141,7 @@ export function wrapRuns(runs,maxWidth,size,measure){
   return lines;
 }
 export function layoutArticle(article,measure,imageSizes={}){
-  const width=PAGE_WIDTH,height=PAGE_HEIGHTS[article.ratio]||1800,margin=72,bottom=height-115,bodySize=article.fontSize||40;
+  const width=PAGE_WIDTH,height=PAGE_HEIGHTS[article.ratio]||PAGE_HEIGHTS[DEFAULT_PAGE_RATIO],margin=72,bottom=height-115,bodySize=article.fontSize||40;
   const pages=[{commands:[]}];let page=pages[0],y=margin;
   const next=()=>{if(!page.commands.length)return;page={commands:[]};pages.push(page);y=margin;};
   const placeText=(runs,size,{heading=false,h1=false,indent=0,quote=false,code=false,gap=28}={})=>{
@@ -195,6 +208,20 @@ export async function normalizeUpload(file){
     return {dataUrl:canvas.toDataURL('image/jpeg',.92),width:canvas.width,height:canvas.height};
   }finally{URL.revokeObjectURL(url);}
 }
+export function articleFooterText(article){
+  const text=(typeof article.footerText==='string'?article.footerText:'视频精读').replace(/[\r\n]+/g,' ').trim();
+  const status=String(article.sourceStatus||'').replace(/[\r\n]+/g,' ').trim();
+  // 来源/未完成状态优先，不能通过清空或自定义页脚掩盖。
+  return status?(text&&text!=='视频精读'?`${status} · ${text}`:status):text;
+}
+export function fitFooterText(text,width,measure){
+  if(!text||width<=0)return '';
+  if(measure(text)<=width)return text;
+  const ellipsis='…';if(measure(ellipsis)>width)return '';
+  const chars=Array.from(text);let low=0,high=chars.length;
+  while(low<high){const mid=Math.ceil((low+high)/2);if(measure(chars.slice(0,mid).join('')+ellipsis)<=width)low=mid;else high=mid-1;}
+  return chars.slice(0,low).join('')+ellipsis;
+}
 export function renderArticlePage(layout,index,article,images={},texture=null,canvas=document.createElement('canvas')){
   canvas.width=layout.width;canvas.height=layout.height;
   const ctx=canvas.getContext('2d');ctx.fillStyle=article.paper==='white'?'#ffffff':'#fcfbf8';ctx.fillRect(0,0,canvas.width,canvas.height);
@@ -207,15 +234,17 @@ export function renderArticlePage(layout,index,article,images={},texture=null,ca
     let x=c.x;
     for(const r of c.runs){
       ctx.font=font(c.size,r);const textY=c.y+(c.lineHeight-c.size)*.35;
-      // 系统宋体可能把900映射为700，细描边确保所有标题实际加重，预览/导出完全共用。
-      if(r.heavy){ctx.save();ctx.strokeStyle=ctx.fillStyle;ctx.lineWidth=c.size*.012;ctx.lineJoin='round';ctx.strokeText(r.text,x,textY);ctx.restore();}
+      // 使用本地可变宋体的真实字重，每个字形只绘制一次，避免描边叠影。
       ctx.fillText(r.text,x,textY);if(r.strike){ctx.fillRect(x,c.y+c.lineHeight*.45,r.width,1.5);}x+=r.width+(r.gapAfter||0);
     }
     ctx.fillStyle='#20221f';
   }
   const y=layout.height-76;ctx.strokeStyle='#d8d8d0';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(72,y-22);ctx.lineTo(layout.width-72,y-22);ctx.stroke();
-  ctx.font=`22px ${SANS}`;ctx.fillStyle='#73776e';ctx.fillText(article.sourceStatus||'视频精读',72,y);
-  ctx.textAlign='right';ctx.fillText(`${String(index+1).padStart(2,'0')} / ${String(layout.pages.length).padStart(2,'0')}`,layout.width-72,y);ctx.textAlign='left';
+  ctx.font=`22px ${SANS}`;ctx.fillStyle='#73776e';
+  const pageLabel=`${String(index+1).padStart(2,'0')} / ${String(layout.pages.length).padStart(2,'0')}`;
+  const footer=fitFooterText(articleFooterText(article),layout.width-144-ctx.measureText(pageLabel).width-24,text=>ctx.measureText(text).width);
+  ctx.textAlign='left';if(footer)ctx.fillText(footer,72,y);
+  ctx.textAlign='right';ctx.fillText(pageLabel,layout.width-72,y);ctx.textAlign='left';
   return canvas;
 }
 export function pngBlob(canvas){return new Promise((resolve,reject)=>canvas.toBlob(b=>b?resolve(b):reject(new Error('PNG 编码失败，请重试本地导出。')),'image/png'));}

@@ -7,14 +7,14 @@
 
 ## 功能 / Features
 
+- 独立临时视频目录支持粘贴YouTube单视频链接并获取信息与字幕，无须订阅频道；按视频ID去重、保存归类并复用解析/对话/图文，错误可恢复，移出目录保留资料，不自动调用AI或付费接口。
 - 输入 YouTube 频道，通过已授权的本地连接器定时同步近期视频并获取可用字幕；同步保存真实频道头像用于订阅列表，失败时回退字母圆标。
-- 支持字幕导入、检索、时间戳跳转、频道筛选、待读与收藏。
+- 支持字幕导入、检索、时间戳跳转、频道筛选、待读与收藏；当前列表可确认数量后全部标记已读，保存失败恢复原状态，并提供本窗口撤销。
+- 频道只在有未读时显示数量，不以正常同步绿点冒充未读；桌面频道栏和视频列表均支持拖拽、键盘调宽与各自恢复默认，两处分隔统一单条细线、无选中外框，宽度独立本地保存，窄屏保持抽屉。
 - 解析和对话默认提供完整文稿、采用自动输出预算，不固定限制为8000；保留真实结束状态与未完成草稿，旧宿主在生成前阻止请求。
 - 本地保存阅读进度、文稿、解析及对话；当前 Windows 用户登录后静默启动连接器，不自动调用付费 AI。
 - 解析、AI回复及未完成草稿采用本地安全Markdown排版，保留完整正文与时间戳跳转。
 - 打开应用默认选中首个订阅频道的首条视频，切换频道同步展示首条内容；自动选中不标记已读，后台更新不覆盖手动选择。
-- 解析与阅读对话接收真实流式正文并增量Markdown展示，定期保存草稿，正常结束才视为完成；中断保留内容且不自动重试。
-- 重新解析在原正文位置流式替换，旧解析默认收起作为失败备份；对话在本次助手消息内输出，不叠加独立生成面板。
 
 ## 源码 / Source
 
@@ -23,7 +23,7 @@
 - 版本 / Version: 0\.1\.0
 - NewMax runtime: ^1\.0\.0
 - 权限 / Permissions: ai\.chat, ai\.stream, data\.kv, files\.appData, notifications, desktopShortcut
-- [本次发布 / Release](https://github.com/yangyixxxx/youread/releases/tag/app-fc667a41-c84f-495e-8794-acf5512ba538)
+- [本次发布 / Release](https://github.com/yangyixxxx/youread/releases/tag/app-e7baed32-0e75-43a8-96d6-eb8c30c28a65)
 
 ## 安装 / Install
 
@@ -33,7 +33,7 @@
 4. 检查来源与权限后，点击「信任并安装」。 / Review the publisher and permissions, then choose Trust and install.
 
 ```text
-NEWMAX-APP:1:yangyixxxx/youread/app-fc667a41-c84f-495e-8794-acf5512ba538:f8686683617fb1b4d4dff69e1177e276e4c8b0bc8ea7eb77521ae2e361d5ffae
+NEWMAX-APP:1:yangyixxxx/youread/app-e7baed32-0e75-43a8-96d6-eb8c30c28a65:8c716c822b1bc21aed33e2a74716ed97f9ff8278269624e84fcd3e9b94bd87d3
 ```
 
 无需 GitHub 登录；安装后需手动打开应用。口令对应此版本，旧口令不会自动升级。

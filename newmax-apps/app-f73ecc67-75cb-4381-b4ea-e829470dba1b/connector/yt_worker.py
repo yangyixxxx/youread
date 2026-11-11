@@ -9,7 +9,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, Request, build_opener, ProxyHandler
+from urllib.error import HTTPError
+from email.utils import parsedate_to_datetime
 
 LIMIT = 8 * 1024 * 1024
 
@@ -24,7 +26,7 @@ class QuietLogger:
     info = warning = error = debug
 
 
-def options(action):
+def options(action, proxy=None):
     result = {
         "quiet": True, "no_warnings": True, "logger": QuietLogger(), "noprogress": True,
         "skip_download": True, "cachedir": False, "socket_timeout": 12,
@@ -38,7 +40,22 @@ def options(action):
     }
     if action == "channel":
         result.update(extract_flat="in_playlist", playlistend=20, playlist_items="1:20", lazy_playlist=True)
+        # yt-dlp 以本次抓取时刻转换“1 hour ago”等文案；这里只作为近似排序依据。
+        result["extractor_args"]["youtubetab"] = {"approximate_date": ["true"]}
+    if action == "captions":
+        result.update(retries=0, extractor_retries=0)
+    if proxy is not None:
+        result["proxy"] = proxy
     return result
+
+
+def retry_after_seconds(headers):
+    raw = headers.get("Retry-After", "") if headers else ""
+    try:
+        seconds = int(raw) if str(raw).isdigit() else (parsedate_to_datetime(raw) - datetime.now(timezone.utc)).total_seconds()
+        return min(86400, max(0, int(seconds)))
+    except (ValueError, TypeError, OverflowError):
+        return 0
 
 
 def safe_caption_url(url):
@@ -81,10 +98,15 @@ def choose_track(info):
     return language, source, track
 
 
-def fetch_captions(info):
+def fetch_captions(info, proxy=None):
+    if not info.get("subtitles") and not info.get("automatic_captions") and not info.get("formats") and info.get("duration") is None:
+        raise SafeFailure("CAPTION_LIST_UNAVAILABLE")
     language, source, track = choose_track(info)
     request = Request(track["url"], headers={"User-Agent": "Mozilla/5.0", "Accept-Encoding": "identity"})
-    with build_opener(SafeRedirect()).open(request, timeout=12) as response:
+    handlers = [SafeRedirect()]
+    if proxy is not None:
+        handlers.append(ProxyHandler({"http": proxy, "https": proxy}))
+    with build_opener(*handlers).open(request, timeout=12) as response:
         if not safe_caption_url(response.url):
             raise SafeFailure("NETWORK_ERROR")
         content_length = response.headers.get("Content-Length")
@@ -93,7 +115,8 @@ def fetch_captions(info):
         raw = response.read(LIMIT + 1)
     if len(raw) > LIMIT:
         raise SafeFailure("CAPTIONS_TOO_LARGE")
-    return {"language": language, "source": source, "format": track["ext"], "raw": raw.decode("utf-8-sig")}
+    return {"language": language, "source": source, "format": track["ext"], "raw": raw.decode("utf-8-sig"),
+            **publication_metadata(info)}
 
 
 def safe_avatar_url(url):
@@ -127,6 +150,41 @@ def channel_avatar(info):
     return max(candidates, default=(False, 0, ""))[2]
 
 
+def publication_date(info):
+    """只接受详情中的绝对日期；无精确时刻时沿用日期零点表示。"""
+    value = info.get("timestamp")
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0:
+        try:
+            return datetime.fromtimestamp(value, timezone.utc).isoformat().replace("+00:00", "Z")
+        except (ValueError, OSError, OverflowError):
+            pass
+    value = info.get("upload_date")
+    if isinstance(value, str) and re.fullmatch(r"\d{8}", value):
+        try:
+            return datetime.strptime(value, "%Y%m%d").replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+        except ValueError:
+            pass
+    return None
+
+
+def publication_metadata(info, approximate=False):
+    value = publication_date(info)
+    if not value:
+        return {"publishedAt": None, "datePrecision": None}
+    timestamp = info.get("timestamp")
+    precision = "second" if isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool) and math.isfinite(timestamp) and 0 < timestamp < 253402300800 else "day"
+    return {"publishedAt": value, "datePrecision": "approximate" if approximate else precision}
+
+
+def video_metadata(info):
+    duration = info.get("duration")
+    if not isinstance(duration, (int, float)) or isinstance(duration, bool) or not math.isfinite(duration) or duration < 0:
+        duration = None
+    return {**publication_metadata(info), "title": str(info.get("title") or "")[:1000],
+            "channelTitle": str(info.get("channel") or info.get("uploader") or "YouTube")[:500],
+            "youtubeId": info.get("channel_id"), "duration": duration}
+
+
 def channel_result(info):
     youtube_id = info.get("channel_id") or info.get("id")
     if not isinstance(youtube_id, str) or not re.fullmatch(r"UC[A-Za-z0-9_-]{22}", youtube_id):
@@ -140,20 +198,12 @@ def channel_result(info):
         if not isinstance(video_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id) or video_id in seen:
             continue
         seen.add(video_id)
-        published = None
-        # Flat entries may have no exact date. Do not invent an approximate publication date.
-        try:
-            if entry.get("timestamp"):
-                published = datetime.fromtimestamp(entry["timestamp"], timezone.utc).isoformat().replace("+00:00", "Z")
-            elif re.fullmatch(r"\d{8}", str(entry.get("upload_date", ""))):
-                published = datetime.strptime(entry["upload_date"], "%Y%m%d").replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
-        except (ValueError, OSError, OverflowError, TypeError):
-            pass
+        published = publication_metadata(entry, approximate=True)
         duration = entry.get("duration")
         if not isinstance(duration, (float, int)) or isinstance(duration, bool) or not math.isfinite(duration) or duration < 0:
             duration = None
         videos.append({"id": video_id, "title": str(entry.get("title") or video_id)[:1000],
-                       "publishedAt": published, "duration": duration,
+                       **published, "duration": duration,
                        "thumbnail": "https://i.ytimg.com/vi/" + video_id + "/mqdefault.jpg"})
     aliases = [info.get(key) for key in ("uploader_url", "channel_url", "webpage_url") if isinstance(info.get(key), str)]
     return {"youtubeId": youtube_id, "title": str(info.get("channel") or info.get("uploader") or info.get("title") or youtube_id)[:500],
@@ -161,9 +211,15 @@ def channel_result(info):
 
 
 def main():
-    if len(sys.argv) != 4 or sys.argv[1] not in ("channel", "captions"):
+    if len(sys.argv) not in (4, 5) or sys.argv[1] not in ("channel", "captions", "metadata"):
         return 2
-    action, url, output = sys.argv[1:]
+    action, url, output = sys.argv[1:4]
+    proxy = sys.argv[4] if len(sys.argv) == 5 else None
+    if proxy is not None:
+        if action != "captions" or not re.fullmatch(r"http://127\.0\.0\.1:\d{4,5}", proxy):
+            return 2
+        if not 1024 <= int(urlsplit(proxy).port) <= 65535:
+            return 2
     # Internal callers already validate input, but keep this boundary restrictive as well.
     parsed = urlsplit(url)
     valid = parsed.scheme == "https" and parsed.netloc == "www.youtube.com" and not parsed.fragment
@@ -178,17 +234,26 @@ def main():
             from yt_dlp import YoutubeDL
         except ImportError:
             raise SafeFailure("DEPENDENCY_MISSING") from None
-        with YoutubeDL(options(action)) as downloader:
+        with YoutubeDL(options(action, proxy)) as downloader:
             info = downloader.extract_info(url, download=False)
             if not isinstance(info, dict):
                 raise SafeFailure("INVALID_RESPONSE")
-            data = channel_result(info) if action == "channel" else fetch_captions(info)
+            if action == "channel":
+                data = channel_result(info)
+            elif action == "metadata":
+                if info.get("id") != parse_qs(parsed.query)["v"][0]:
+                    raise SafeFailure("INVALID_RESPONSE")
+                data = video_metadata(info)
+            else:
+                data = fetch_captions(info, proxy)
         result = {"ok": True, "data": data}
+    except HTTPError as error:
+        result = {"ok": False, "code": "RATE_LIMITED" if error.code == 429 else "NETWORK_ERROR", "retryAfter": retry_after_seconds(error.headers) if error.code == 429 else 0}
     except SafeFailure as error:
         result = {"ok": False, "code": str(error)}
-    except Exception:
-        # yt-dlp exceptions may contain cookies, signed URLs, IPs and proxy credentials.
-        result = {"ok": False, "code": "NETWORK_ERROR"}
+    except Exception as error:
+        # 仅输出固定错误码；第三方异常可包含签名URL、Cookies与代理凭据。
+        result = {"ok": False, "code": "RATE_LIMITED" if re.search(r"(?:HTTP Error|HTTP error|status code)\s*:?\s*429\b", str(error)) else "NETWORK_ERROR"}
     Path(output).write_text(json.dumps(result, ensure_ascii=False, allow_nan=False), encoding="utf-8")
     return 0 if result["ok"] else 1
 

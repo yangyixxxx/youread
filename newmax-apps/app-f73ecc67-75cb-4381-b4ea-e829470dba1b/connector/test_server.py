@@ -48,6 +48,9 @@ class FakeBackend:
             raise self.channel_error
         return copy.deepcopy(self.result)
 
+    def metadata(self, identifier):
+        return {"publishedAt": None}
+
     def captions(self, identifier):
         self.caption_calls.append(identifier)
         if self.caption_error:
@@ -264,7 +267,7 @@ class LibraryTests(unittest.TestCase):
         restored.process_next()
         recovered = s.Library(self.temp.name, self.backend, clock=lambda: self.now)
         self.addCleanup(recovered.close)
-        self.assertEqual(recovered.jobs.qsize(), 3)
+        self.assertEqual(recovered.jobs.qsize(), 8)  # 三条字幕和五条缺失日期。
         recovered.process_next()
         self.assertEqual(recovered.snapshot()["videos"][0]["transcriptStatus"], "ready")
 
@@ -413,6 +416,8 @@ class LibraryTests(unittest.TestCase):
     def test_invalid_caption_does_not_block_following_jobs(self):
         self.add()
         self.library.process_next()
+        for _ in range(5):  # 日期任务优先于字幕任务；不让此夹具误测metadata。
+            self.library.process_next()
         with patch.object(self.backend, "captions", return_value={"raw": "invalid", "format": "json3"}):
             self.library.process_next()
         self.drain()
@@ -480,7 +485,7 @@ class AuthHTTPTests(unittest.TestCase):
     def test_health_and_library_shapes(self):
         status, body, _ = self.request("GET", "/health")
         self.assertEqual(status, 200)
-        self.assertEqual(set(body), {"ok", "version", "workerRunning", "pid", "background", "capabilities"}
+        self.assertEqual(set(body), {"ok", "version", "workerRunning", "pid", "background", "capabilities", "captionProxy", "temporaryVideos"}
                          | ({"frameReason"} if not body["capabilities"]["videoFrames"] else set()))
         self.assertEqual(body["pid"], os.getpid())
         self.assertFalse(body["background"])

@@ -17,7 +17,7 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Could not create the Python virtual environment.' }
     }
 
-    & $Python -I -c "import sys, importlib.util as u; from importlib.metadata import version; sys.exit(0 if u.find_spec('yt_dlp') and u.find_spec('yt_dlp_ejs') and version('yt-dlp') == '2026.8.19' else 1)"
+    & $Python -I -c "import sys, importlib.util as u; from importlib.metadata import version; sys.exit(0 if u.find_spec('yt_dlp') and u.find_spec('yt_dlp_ejs') and u.find_spec('yaml') and version('PyYAML') == '6.0.3' and version('yt-dlp') == '2026.8.19' else 1)"
     if ($LASTEXITCODE -ne 0) {
         Write-Host 'Installing the pinned yt-dlp dependency into the connector environment...'
         & $Python -I -m pip install --disable-pip-version-check -r (Join-Path $Connector 'requirements.txt')

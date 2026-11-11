@@ -63,4 +63,19 @@
 @keyframes stream-pulse{50%{opacity:.3}}
 .tabs{flex-wrap:wrap;column-gap:20px}.editorial-entry{margin-left:auto;white-space:nowrap;color:var(--green)}
 @media(max-width:1100px){.tabs{column-gap:14px}.editorial-entry{margin-left:0}}
+/* 频道数字只表示未读；无未读不保留绿色装饰点。 */
+.channel-unread{flex-shrink:0;min-width:19px;padding:0 5px;border-radius:5px;font-size:10px;line-height:20px;text-align:center;font-variant-numeric:tabular-nums;background:#dfe8d8;color:var(--green-dark)}
+.channel-sync{flex-shrink:0;font-size:13px;color:var(--muted);font-weight:600}.channel-sync.error{color:var(--error)}
+/* 两处分隔都是一条线；透明命中区更宽，聚焦不绘制矩形外框。 */
+.pane-resizer{width:1px;flex:0 0 1px;position:relative;align-self:stretch;cursor:col-resize;touch-action:none;background:var(--line);border:0;outline:none;box-shadow:none;z-index:21}
+.pane-resizer:before{content:"";position:absolute;inset:0 auto 0 -4px;width:9px;background:transparent}
+.pane-resizer:hover,.pane-resizer:focus-visible,.pane-resizer.is-dragging{background:var(--green);outline:none;box-shadow:none}
+.resizing-panes,.resizing-panes *{cursor:col-resize!important;user-select:none!important}
+@media(min-width:861px){.sidebar,.video-pane{border-right:0}}
+@media(max-width:860px){.pane-resizer{display:none}}
+/* 批量操作只占列表内一小行，撤销可换行，不挤压搜索与阅读区。 */
+.bulk-read-actions{display:flex;flex-wrap:wrap;align-items:center;gap:2px 6px;padding:0 18px 8px;flex-shrink:0}
+.bulk-read-actions .button{min-height:34px;font-size:11px;padding:5px 7px;color:var(--green);white-space:normal;text-align:left;justify-content:flex-start}
+.bulk-read-actions .bulk-undo{font-size:10px;color:var(--muted);text-decoration:underline;text-underline-offset:3px}
+@media(max-width:860px){.bulk-read-actions{padding-inline:24px}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}

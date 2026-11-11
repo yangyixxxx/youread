@@ -64,7 +64,9 @@ CORS 只允许序列化的 `null` origin，以及 HTTP(S) localhost、127.0.0.1�
 - handle 忽略大小写去重；UC ID 保留大小写。解析得到 canonical channel ID 后合并同一频道的不同输入，保留已有频道 ID，将视频归属迁移到保留项。
 - 视频按 YouTube video ID 去重。取消订阅保留已抓取视频和字幕；进行中的频道结果不会复活已取消的订阅。重订阅时重新关联保留视频。
 - 中英文优先，同一语言组人工字幕优先；支持 json3 和 VTT，剔除自动翻译轨道。滚动字幕按相邻段落的前后重叠去重，保留远处的真实重复内容。
-- flat 响应无法提供精确发布日期时 `publishedAt: null`，不伪造日期或字幕。
+- flat 响应缺少日期时保留已有 `publishedAt`，没有旧日期才为 null；成功获取字幕时顺便回填详情日期，不伪造日期或字幕。
+- `POST /dates/refresh`（空JSON、沿用Bearer/Host/CORS认证）显式将资料库全部视频加入单视频日期队列，不受最新20条限制、不抓音视频或AI；同批处理中重复请求不重复排队。每条原子保存，重启恢复未完成任务。`GET /library`中视频附带`dateStatus: pending/fetching/ready/unavailable/error`与`dateError`；失败不覆盖旧日期，不循环重试。
+- 管理入口：在应用目录执行 `connector/.venv/Scripts/python.exe -I -X utf8 connector/refresh_dates.py --data-dir <原应用数据目录> --report <结果JSON路径>`。只使用本机现有凭据，不输出令牌；报告逐条日期和错误，并对比文稿/排版/阅读数据散列。日期只有年月日时沿用UTC零点表示，不宣称知道精确发布时刻。
 - 单次连接 socket timeout 12 秒，常规/提取器重试各最多 1 次。整个频道子进程上限 75 秒，字幕子进程上限 90 秒。
 - 网络失败、不可访问内容、无字幕和解析失败都有中文可恢复状态；异常不会阻塞后续队列。关闭时打断的工作恢复为 pending。
 
@@ -114,6 +116,16 @@ CORS 只允许序列化的 `null` origin，以及 HTTP(S) localhost、127.0.0.1�
 - 同一公开频道首条视频 `71ya_JC_IbM` → 英文人工 json3 字幕，解析 436 段；频道+字幕合计 5.42 秒。
 
 这仅证明当次公开内容可访问，不保证所有地区/频道/未来请求可用。网络不可用时必须保留真实 error/unavailable 状态，不能把联网失败当作测试通过。
+
+## 已授权的Clash字幕专用池（2026-11-05）
+- 需要当前用户明确授权配置Clash。`setup_caption_pool.py --clash-config <当前Clash运行YAML> --data-dir <应用数据目录> --report <不含密钥的报告>`仅通过本机控制接口载入专用HTTP listener与`映读字幕专用`选择组，验证原代理选择、模式和规则保持。安装回执中断时只读核验已存在的专用组后接管，不重复重载。
+- 本机已授权修改Clash全局扩展`profiles/Script.js`，以后订阅刷新会重新生成独立组与127.0.0.1:18883入口；原脚本的默认空实现备份在应用.tmp/clash-script-before-yingdu.js。没有复制订阅/节点密钥进源码或临时配置，控制密钥每次从原Clash运行配置读取且不传给前端。接收者必须自行授权配置，app-data不随源码分享。
+- 应用数据中的`connector/caption-proxy.json`仅保存是否启用、原Clash配置路径、专用组名称及本机入口；冷却/上次请求写入`caption-pool-state.json`，重启不清空。Clash不可用时不降级全局出口。
+- 字幕详情和字幕正文均显式走同一专用入口；只允许127.0.0.1 HTTP代理，不传浏览器Cookie。每次任务最多3次节点尝试、起始间隔至少20秒，禁用yt-dlp字幕内部重试；429节点默认30分钟冷却，遵守最长24小时的Retry-After；网络失败冷却5分钟；无字幕不轮换。
+- `GET /health.captionProxy`公开非敏感状态，所有节点冷却时字幕POST返回429且不重新排队；没有无限自动恢复/扣费。相同节点不保证不同公网IP，不承诺绕过平台限制。
+- 目前已启用的NewMax托管目录没有YouTube字幕动作，付费备用明确为未配置，不存在自动扣费或伪造API。配置真实付费服务后仍需对应运行时与原生确认，不能直接把开发工具当应用后端。
+- 当前真实测试：专用节点自动切换正常，全局选择保持；但目标Top Tips视频仍未返回可用字幕，当前三个出口已冷却。播放格式/时长/字幕列表均缺失时返回CAPTION_LIST_UNAVAILABLE，不误称视频无字幕。节点池不保证解除平台限制，不绕登录或导入Cookie。
+- 配置参考：https://wiki.metacubex.one/en/config/inbound/listeners/ （proxy固定出站）；https://www.clashverge.dev/guide/extend.html （全局扩展Script）。
 
 ## 恢复操作
 

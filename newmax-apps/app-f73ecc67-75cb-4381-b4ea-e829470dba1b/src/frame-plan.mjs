@@ -1,4 +1,5 @@
 import {markdownTokens} from './markdown.mjs';
+import {parseTimeCitation} from './time-citations.mjs';
 
 export function parseFrameTime(value){
   const text=String(value??'').trim();
@@ -17,7 +18,7 @@ function tokenTimes(children=[]){
     if(t.type==='time_citation')values.push(t.meta.seconds);
     if(t.type==='link_open'){
       const end=children.findIndex((c,j)=>j>i&&c.type==='link_close');
-      if(end>i){const label=children.slice(i+1,end).map(c=>c.content||'').join('').replace(/^\[|\]$/g,'');const n=parseFrameTime(label);if(n!==null&&label.includes(':'))values.push(n);i=end;}
+      if(end>i){const label=children.slice(i+1,end).map(c=>c.content||'').join('');const time=parseTimeCitation(label);if(time)values.push(time.seconds);i=end;}
     }
   }
   return values;

@@ -40,7 +40,7 @@ function Assert-Environment {
     foreach ($path in @($Python, $Pythonw, $Entry)) {
         if (-not (Test-Path -LiteralPath $path)) { throw '缺少运行环境，请先运行 start-connector.cmd 修复。' }
     }
-    & $Python -I -c "import yt_dlp, yt_dlp_ejs"
+    & $Python -I -c "import yt_dlp, yt_dlp_ejs, yaml"
     if ($LASTEXITCODE -ne 0) { throw '连接器依赖不完整，请运行 start-connector.cmd 修复。' }
 }
 function Start-Background {

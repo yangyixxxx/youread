@@ -21,16 +21,20 @@ import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlsplit, parse_qs
 
 if __package__:
     from . import frame_worker as frames
+    from . import caption_pool as pools
 else:
     # 手动入口使用 python -I，不把工作目录或任意搜索路径加入导入环境。
     import importlib.util
     _frame_spec = importlib.util.spec_from_file_location("yingdu_frame_worker", Path(__file__).with_name("frame_worker.py"))
     frames = importlib.util.module_from_spec(_frame_spec)
     _frame_spec.loader.exec_module(frames)
+    _pool_spec = importlib.util.spec_from_file_location("yingdu_caption_pool", Path(__file__).with_name("caption_pool.py"))
+    pools = importlib.util.module_from_spec(_pool_spec)
+    _pool_spec.loader.exec_module(pools)
 
 VERSION = "1.0.0"
 HOST, PORT = "127.0.0.1", 18743
@@ -89,6 +93,30 @@ def normalize_channel(value):
     else:
         raise ConnectorError("INVALID_CHANNEL", "这不是受支持的频道地址，请使用 @名称或 /channel/UC… 主页链接。")
     return "https://www.youtube.com" + path, key
+
+
+def normalize_video(value):
+    if not isinstance(value, str) or len(value) > 2048 or re.search(r"[\x00-\x20\\]", value.strip()):
+        raise ConnectorError("INVALID_VIDEO", "请输入有效的 HTTPS YouTube 视频链接。")
+    try:
+        parsed = urlsplit(value.strip())
+        if parsed.scheme != "https" or parsed.username is not None or parsed.password is not None or parsed.port is not None:
+            raise ValueError()
+        identifier = None
+        if parsed.hostname in ("youtube.com", "www.youtube.com", "m.youtube.com"):
+            if parsed.path == "/watch":
+                ids = parse_qs(parsed.query).get("v", [])
+                identifier = ids[0] if len(ids) == 1 else None
+            else:
+                match = re.fullmatch(r"/(?:shorts|live)/([A-Za-z0-9_-]{11})/?", parsed.path)
+                identifier = match[1] if match else None
+        elif parsed.hostname == "youtu.be":
+            identifier = parsed.path.strip("/")
+        if not isinstance(identifier, str) or not VIDEO_ID.fullmatch(identifier):
+            raise ValueError()
+    except ValueError:
+        raise ConnectorError("INVALID_VIDEO", "仅支持 YouTube 单视频链接（watch、youtu.be、shorts、live），不支持频道或播放列表。") from None
+    return identifier
 
 
 def utc_iso(timestamp=None):
@@ -192,16 +220,19 @@ def atomic_json(path, value):
 
 class YtDlpBackend:
     """One bounded subprocess per job; no shell, inherited cookie config, or raw logs."""
-    def __init__(self, python=None):
+    def __init__(self, python=None, pool=None):
         self.python = python or sys.executable
+        self.pool = pool
         self.active = None
         self.lock = threading.Lock()
         self.stopping = False
 
-    def _call(self, action, url):
+    def _call(self, action, url, proxy=None):
         with tempfile.TemporaryDirectory(prefix="newmax-youtube-") as folder:
             output = Path(folder) / "result.json"
             command = [self.python, "-I", str(Path(__file__).with_name("yt_worker.py")), action, url, str(output)]
+            if proxy is not None:
+                command.append(proxy)
             try:
                 with self.lock:
                     if self.stopping:
@@ -227,11 +258,15 @@ class YtDlpBackend:
                     messages = {
                         "DEPENDENCY_MISSING": "缺少 yt-dlp 依赖，请重新运行启动脚本安装后重试。",
                         "NO_CAPTIONS": "此视频暂无可用字幕，可稍后重试或手动导入文稿。",
+                        "RATE_LIMITED": "YouTube字幕接口限流（HTTP 429），请等待冷却后再获取；不是视频无法访问。",
+                        "CAPTION_LIST_UNAVAILABLE": "当前出口未取得完整的视频播放及字幕信息，可能受到YouTube访问或验证限制；不能据此认定视频没有字幕。",
                         "NETWORK_ERROR": "无法访问 YouTube 或内容受限，请检查网络后重试；也可导入文稿。",
                         "CAPTIONS_TOO_LARGE": "字幕超过 8 MB 限额，可改为手动导入文稿。",
                         "INVALID_RESPONSE": "YouTube 未返回有效频道数据，请核对频道并稍后重试。",
                     }
-                    raise ConnectorError(code if code in messages else "EXTRACTOR_FAILED", messages.get(code, "获取失败，请检查网络后重试。"), 502)
+                    error = ConnectorError(code if code in messages else "EXTRACTOR_FAILED", messages.get(code, "获取失败，请检查网络后重试。"), 429 if code == "RATE_LIMITED" else 502)
+                    error.retry_after = result.get("retryAfter", 0)
+                    raise error
                 return result["data"]
             except (OSError, ValueError, KeyError, TypeError):
                 raise ConnectorError("EXTRACTOR_FAILED", "连接器无法读取抓取结果，请检查 Python 环境并重试。", 502) from None
@@ -242,7 +277,18 @@ class YtDlpBackend:
     def captions(self, video_id):
         if not VIDEO_ID.fullmatch(video_id):
             raise ConnectorError("INVALID_VIDEO", "视频 ID 无效。", 400)
-        return self._call("captions", "https://www.youtube.com/watch?v=" + video_id)
+        url = "https://www.youtube.com/watch?v=" + video_id
+        if self.pool and self.pool.enabled:
+            try:
+                return self.pool.fetch(lambda proxy: self._call("captions", url, proxy), lambda: self.stopping)
+            except pools.PoolError as error:
+                raise ConnectorError(error.code, error.message, 429 if error.code == "CAPTION_COOLDOWN" else 503) from None
+        return self._call("captions", url)
+
+    def metadata(self, video_id):
+        if not VIDEO_ID.fullmatch(video_id):
+            raise ConnectorError("INVALID_VIDEO", "视频 ID 无效。", 400)
+        return self._call("metadata", "https://www.youtube.com/watch?v=" + video_id)
 
     def close(self):
         with self.lock:
@@ -256,7 +302,9 @@ class Library:
         self.directory = Path(data_dir)
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path = self.directory / "library.json"
-        self.backend, self.clock = backend or YtDlpBackend(), clock
+        self.backend, self.clock = backend or YtDlpBackend(pool=pools.CaptionPool(self.directory)), clock
+        if isinstance(self.backend, YtDlpBackend) and self.backend.pool:
+            self.backend.pool.warmup()
         self.frame_backend = frame_backend if frame_backend is not None else frames.FrameBackend()
         # Ephemeral only: never journal/restart network work or persist signed URLs/JPEGs.
         self.frame_jobs = {}
@@ -282,6 +330,12 @@ class Library:
                 self._queue("channel", channel["id"])
         for video in self.state["videos"]:
             if video["transcriptStatus"] in ("pending", "fetching"):
+                video["transcriptStatus"] = "pending"
+                self._queue("transcript", video["id"])
+            if video.get("dateStatus") in ("pending", "fetching") or video.get("infoStatus") in ("pending", "fetching"):
+                video["dateStatus"] = "pending"
+                self._queue("metadata", video["id"])
+            elif video.get("_fetchCaptionsAfterInfo") and video.get("infoStatus") == "ready" and video["transcriptStatus"] == "none":
                 video["transcriptStatus"] = "pending"
                 self._queue("transcript", video["id"])
         self._save()
@@ -362,6 +416,52 @@ class Library:
     def _public(item):
         return copy.deepcopy({k: v for k, v in item.items() if not k.startswith("_")})
 
+    def add_video(self, value):
+        identifier = normalize_video(value)
+        with self.lock:
+            before = copy.deepcopy(self.state)
+            video = self._video(identifier)
+            duplicate = video is not None
+            if video is None:
+                video = {"id": identifier, "title": "正在获取视频信息…", "channelId": None,
+                         "channelTitle": "临时视频", "url": "https://www.youtube.com/watch?v=" + identifier,
+                         "thumbnail": "https://i.ytimg.com/vi/" + identifier + "/mqdefault.jpg",
+                         "publishedAt": None, "duration": None, "transcriptStatus": "none", "transcriptError": None}
+                self.state["videos"].append(video)
+            video["temporary"] = True
+            fetch = not duplicate or video.get("infoStatus") == "error"
+            if fetch:
+                video.update(infoStatus="pending", infoError=None, dateStatus="pending")
+                video["_fetchCaptionsAfterInfo"] = video["transcriptStatus"] != "ready"
+            try:
+                self._save()
+            except Exception:
+                self.state = before
+                raise
+            if fetch:
+                self._queue("metadata", identifier)
+            elif video["transcriptStatus"] not in ("ready", "pending", "fetching"):
+                try:
+                    self.request_transcript(identifier)
+                except ConnectorError as error:
+                    video.update(transcriptStatus="error", transcriptError=error.message, transcriptErrorCode=error.code)
+                    self._save()
+            return {"ok": True, "video": self._public(video), "duplicate": duplicate}
+
+    def remove_temporary(self, identifier):
+        with self.lock:
+            video = self._video(identifier)
+            if video is None:
+                raise ConnectorError("VIDEO_NOT_FOUND", "找不到视频。", 404)
+            before = video.get("temporary", False)
+            video["temporary"] = False
+            try:
+                self._save()
+            except Exception:
+                video["temporary"] = before
+                raise
+            return {"ok": True, "retainedVideos": True}
+
     def sync(self, channel_id=None):
         with self.lock:
             targets = self.state["channels"] if channel_id is None else [self._channel(channel_id)]
@@ -393,13 +493,70 @@ class Library:
             self._save()
             return {"ok": True, "settings": copy.deepcopy(self.state["settings"])}
 
+    @staticmethod
+    def _apply_publication(video, result):
+        # 列表相对日期不得覆盖已保存的绝对日期，也不随轮询反复漂移。
+        value = result.get("publishedAt")
+        if not value or (result.get("datePrecision") == "approximate" and video.get("publishedAt")):
+            return False
+        video.update(publishedAt=value, datePrecision=result.get("datePrecision") or "day")
+        return True
+
+    def refresh_dates(self, missing_only=False):
+        """显式全库/仅缺项补取；不触发频道扩展、字幕下载或AI。"""
+        with self.lock:
+            if not missing_only and any(kind == "metadata" for kind, _ in self.scheduled):
+                return {"ok": True, "queued": 0, "total": len(self.state["videos"])}
+            targets = [v for v in self.state["videos"] if ("metadata", v["id"]) not in self.scheduled
+                       and (not missing_only or not v.get("publishedAt") or v.get("datePrecision") == "approximate")]
+            for video in targets:
+                video.update(dateStatus="pending", dateError=None)
+            self._save()
+            for video in targets:
+                self._queue("metadata", video["id"])
+            return {"ok": True, "queued": len(targets), "total": len(self.state["videos"])}
+
+    def _process_metadata(self, identifier):
+        with self.lock:
+            video = self._video(identifier)
+            if video is None:
+                return
+            video.update(dateStatus="fetching", dateError=None)
+            if video.get("infoStatus") in ("pending", "error"):
+                video.update(infoStatus="fetching", infoError=None)
+            self._save()
+        result = self.backend.metadata(identifier)
+        with self.lock:
+            video = self._video(identifier)
+            if video.get("infoStatus") == "fetching":
+                if not isinstance(result.get("title"), str) or not result["title"].strip():
+                    raise ConnectorError("INVALID_RESPONSE", "视频详情未返回有效标题，请手动重试。", 502)
+                video.update(title=result["title"][:1000], channelTitle=str(result.get("channelTitle") or "YouTube")[:500],
+                             duration=result.get("duration"), infoStatus="ready", infoError=None)
+                video["_youtubeChannelId"] = result.get("youtubeId")
+                channel = next((c for c in self.state["channels"] if c.get("youtubeId") and c["youtubeId"] == result.get("youtubeId")), None)
+                if channel:
+                    video["channelId"] = channel["id"]
+            if result.get("publishedAt"):
+                self._apply_publication(video, result)
+                video.update(dateStatus="ready", dateError=None)
+            else:
+                video.update(dateStatus="unavailable", dateError="视频详情未提供发布日期，已保留原有日期。")
+            self._save()
+            if video.pop("_fetchCaptionsAfterInfo", False):
+                self.request_transcript(identifier)
+
     def request_transcript(self, identifier):
         with self.lock:
             video = self._video(identifier)
             if video is None:
                 raise ConnectorError("VIDEO_NOT_FOUND", "找不到视频，请刷新列表。", 404)
             if video["transcriptStatus"] != "ready" and ("transcript", identifier) not in self.scheduled:
-                video.update(transcriptStatus="pending", transcriptError=None)
+                pool = self.backend.pool if isinstance(self.backend, YtDlpBackend) else None
+                status = pool.status() if pool and pool.enabled else {}
+                if status.get("nodeCount", 0) and not status.get("available", 0):
+                    raise ConnectorError("CAPTION_COOLDOWN", "字幕专用出口仍在冷却，未重复排队；请等待冷却结束。", 429)
+                video.update(transcriptStatus="pending", transcriptError=None, transcriptErrorCode=None)
                 self._save()
                 self._queue("transcript", identifier)
             return {"ok": True, "videoId": identifier, "status": video["transcriptStatus"]}
@@ -583,7 +740,7 @@ class Library:
                     channel["_aliases"] = sorted(set(channel["_aliases"] + [normalize_channel(discovered)[1]]))
                 except ConnectorError:
                     pass
-            new_videos = []
+            new_videos, date_videos = [], []
             for entry in result["videos"][:20]:
                 if not isinstance(entry, dict) or not isinstance(entry.get("id"), str) or not VIDEO_ID.fullmatch(entry["id"]):
                     continue
@@ -594,8 +751,12 @@ class Library:
                     new_videos.append(video)
                 video.update(title=str(entry.get("title") or entry["id"])[:1000], channelId=channel["id"],
                              channelTitle=channel["title"], url="https://www.youtube.com/watch?v=" + entry["id"],
-                             publishedAt=entry.get("publishedAt"), duration=entry.get("duration"),
-                             thumbnail=entry.get("thumbnail"), _youtubeChannelId=youtube_id)
+                             duration=entry.get("duration"), thumbnail=entry.get("thumbnail"), _youtubeChannelId=youtube_id)
+                self._apply_publication(video, entry)
+                video.setdefault("publishedAt", None)
+                if (not video.get("publishedAt") or video.get("datePrecision") == "approximate") and ("metadata", video["id"]) not in self.scheduled:
+                    video.update(dateStatus="pending", dateError=None)
+                    date_videos.append(video)
             # Relink retained older videos when a previously removed channel is subscribed again.
             for video in self.state["videos"]:
                 if video.get("_youtubeChannelId") == youtube_id:
@@ -605,6 +766,9 @@ class Library:
                 video.update(transcriptStatus="pending", transcriptError=None)
             self.state["lastSync"] = channel["lastSync"]
             self._save()
+            # 日期独立于字幕成功与否，优先补齐，字幕429不会阻断日期入库。
+            for video in date_videos:
+                self._queue("metadata", video["id"])
             for video in auto:
                 self._queue("transcript", video["id"])
 
@@ -621,7 +785,10 @@ class Library:
                       "source": result.get("source", "youtube"), "raw": raw, "format": fmt}
         with self.lock:
             atomic_json(self.directory / "transcripts" / (identifier + ".json"), transcript)
-            self._video(identifier).update(transcriptStatus="ready", transcriptError=None)
+            video = self._video(identifier)
+            video.update(transcriptStatus="ready", transcriptError=None, transcriptErrorCode=None)
+            if result.get("publishedAt"):
+                self._apply_publication(video, result)
             self._save()
 
     def process_next(self, timeout=0):
@@ -634,6 +801,8 @@ class Library:
                 self._process_channel(identifier)
             elif kind == "frames":
                 self._process_frames(identifier)
+            elif kind == "metadata":
+                self._process_metadata(identifier)
             else:
                 self._process_transcript(identifier)
         except Exception as error:
@@ -645,7 +814,14 @@ class Library:
             with self.lock:
                 item = self._channel(identifier) if kind == "channel" else self._video(identifier)
                 if item:
-                    if self.stop_event.is_set():
+                    if kind == "metadata":
+                        item.update(dateStatus="pending" if self.stop_event.is_set() else "error",
+                                    dateError=None if self.stop_event.is_set() else message)
+                        if item.get("infoStatus") in ("pending", "fetching"):
+                            item.update(infoStatus="pending" if self.stop_event.is_set() else "error", infoError=message)
+                        elif item.get("infoStatus") == "ready" and item.get("transcriptStatus") == "none":
+                            item.update(transcriptStatus="error", transcriptError=message)
+                    elif self.stop_event.is_set():
                         if kind == "channel":
                             item.update(status="pending", error=None)
                         else:
@@ -654,7 +830,7 @@ class Library:
                         item.update(status="error", error=message, _lastAttempt=self.clock())
                     else:
                         status = "unavailable" if isinstance(error, ConnectorError) and error.code == "NO_CAPTIONS" else "error"
-                        item.update(transcriptStatus=status, transcriptError=message)
+                        item.update(transcriptStatus=status, transcriptError=message, transcriptErrorCode=error.code if isinstance(error, ConnectorError) else "UNKNOWN")
                     try:
                         self._save()
                     except Exception:
@@ -815,9 +991,10 @@ class Handler(BaseHTTPRequestHandler):
             raise ConnectorError("NOT_FOUND", "接口不存在，请刷新应用。", 404, False)
         method, path, library = self.command, self.path, self.server.library
         if method == "GET" and path == "/health":
-            return 200, {"ok": True, "version": VERSION,
+            return 200, {"ok": True, "version": VERSION, "temporaryVideos": True,
                          "workerRunning": bool(library.worker and library.worker.is_alive()),
                          "pid": os.getpid(), "background": getattr(self.server, "background", False),
+                         "captionProxy": library.backend.pool.status() if isinstance(library.backend, YtDlpBackend) and library.backend.pool else {"enabled": False, "paidFallback": "not_configured"},
                          **library.frame_capability()}
         if method == "POST" and path == "/shutdown":
             self._body()
@@ -826,6 +1003,17 @@ class Handler(BaseHTTPRequestHandler):
             return 200, {"ok": True, "stopping": True}
         if method == "GET" and path == "/library":
             return 200, library.snapshot()
+        if method == "POST" and path == "/videos":
+            body = self._body()
+            if set(body) != {"url"}:
+                raise ConnectorError("INVALID_BODY", "添加临时视频需要且仅需要 url 字段。")
+            return 202, library.add_video(body["url"])
+        match = re.fullmatch(r"/videos/([A-Za-z0-9_-]{11})", path)
+        if method == "PATCH" and match:
+            body = self._body()
+            if set(body) != {"temporary"} or body["temporary"] is not False:
+                raise ConnectorError("INVALID_BODY", "此操作仅支持移出临时目录，不删除资料。")
+            return 200, library.remove_temporary(match[1])
         if method == "POST" and path == "/channels":
             body = self._body()
             if set(body) != {"url"}:
@@ -836,6 +1024,11 @@ class Handler(BaseHTTPRequestHandler):
             if set(body) - {"channelId"} or (body.get("channelId") is not None and not isinstance(body["channelId"], str)):
                 raise ConnectorError("INVALID_BODY", "channelId 必须是频道标识字符串。")
             return 202, library.sync(body.get("channelId"))
+        if method == "POST" and path == "/dates/refresh":
+            body = self._body(optional=True)
+            if set(body) - {"missingOnly"} or ("missingOnly" in body and type(body["missingOnly"]) is not bool):
+                raise ConnectorError("INVALID_BODY", "日期刷新仅接受布尔值 missingOnly，不接受自定义URL。")
+            return 202, library.refresh_dates(missing_only=body.get("missingOnly", False))
         if method == "PATCH" and path == "/settings":
             return 200, library.update_settings(self._body())
         match = re.fullmatch(r"/channels/([A-Za-z0-9_-]{1,100})", path)

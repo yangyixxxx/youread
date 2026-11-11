@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {articleSources,newArticle,validateArticle,articleBlocks,wrapRuns,layoutArticle,renderArticlePage,zipFiles,crc32} from '../src/editorial.mjs';
+import {articleSources,newArticle,validateArticle,articleBlocks,wrapRuns,layoutArticle,renderArticlePage,zipFiles,crc32,prepareEditorialFonts} from '../src/editorial.mjs';
 import {summaryPrompt,mergePrompt} from '../src/core.mjs';
 const measure=(s,f)=>Array.from(s).length*Number(f.match(/(\d+)px/)[1]);
 const base=body=>({...newArticle({title:'测试标题',channelTitle:'测试来源'},{text:body}),paper:'plain'});
@@ -13,7 +13,7 @@ test('来源副本包含解析、未完成草稿、回复与原文，不改写�
   const a=newArticle({title:'原标题'},sources[0]);assert.equal(a.title,'中文标题');assert.equal(a.body,'正文');assert.equal(JSON.stringify(r),before);
 });
 test('排版草稿校验及无效枚举回退，不接受未知数据结构',()=>{
-  assert.throws(()=>validateArticle({version:9}),/格式/);const a=validateArticle({...base('全文'),ratio:'错误',fontSize:1,paper:'remote'});assert.equal(a.ratio,'3:5');assert.equal(a.fontSize,40);assert.equal(a.paper,'plain');
+  assert.throws(()=>validateArticle({version:9}),/格式/);const a=validateArticle({...base('全文'),ratio:'错误',fontSize:1,paper:'remote'});assert.equal(a.ratio,'3:4');assert.equal(a.fontSize,40);assert.equal(a.paper,'plain');
 });
 test('共用中文粗体语义、列表、引用、代码，但图片隐藏时间引用',()=>{
   const blocks=articleBlocks('## 第一节\n\n**这是为什么？**解释 [1:23]\n\n1. 第一项\n2. 第二项\n\n> 引用文字\n\n```js\nconst x=1;\n```');
@@ -110,15 +110,37 @@ test('章节标题的显式换行不被合并或强制拉满，正文换行无�
   assert(headings.every(c=>c.size===50&&c.runs.every(r=>!r.gapAfter)));
   assert(commands.filter(c=>!c.runs.some(r=>r.heavy)).every(c=>c.size===40&&c.runs.every(r=>!r.gapAfter)));
 });
-test('H1测量与绘制同用900字重及细描边，按布局字距绘制',()=>{
-  const a={...base('普通正文'),title:'甲'.repeat(25)},layout=layoutArticle(a,measure),calls=[];
-  const ctx={fillStyle:'',font:'',save(){},restore(){},fillRect(){},beginPath(){},moveTo(){},lineTo(){},stroke(){},strokeText(text,x,y){calls.push({type:'stroke',text,x,y,font:this.font,width:this.lineWidth});},fillText(text,x,y){calls.push({type:'fill',text,x,y,font:this.font});}};
+test('标题与正文强调使用真实字重且只填充一次，无轮廓描边或偏移叠绘',()=>{
+  const a={...base('## 做得出来，不等于时机已经到了\n\n普通正文与**粗体强调**。'),title:'甲'.repeat(25)},measured=[],calls=[];
+  const layout=layoutArticle(a,(s,f)=>{measured.push(f);return measure(s,f);});
+  const ctx={fillStyle:'',font:'',measureText(text){return {width:Array.from(text).length*11};},fillRect(){},beginPath(){},moveTo(){},lineTo(){},stroke(){},strokeText(){assert.fail('不得通过轮廓描边加粗');},fillText(text,x,y){calls.push({text,x,y,font:this.font});}};
   renderArticlePage(layout,0,a,{},null,{getContext:()=>ctx});
-  const stroked=calls.filter(c=>c.type==='stroke'),h1=layout.pages[0].commands.filter(c=>c.h1);
-  assert.equal(stroked.length,25);assert(stroked.every(c=>c.font.startsWith('900 ')&&c.width>0&&c.width<1));
-  const first=h1[0];let x=first.x;
-  for(let i=0;i<first.runs.length;i++){assert(Math.abs(stroked[i].x-x)<.001);x+=first.runs[i].width+(first.runs[i].gapAfter||0);}
-  assert(Math.abs(x-1008)<.001);assert(calls.some(c=>c.type==='fill'&&c.font.startsWith('400 ')));
+  const commands=layout.pages[0].commands,runCount=commands.reduce((n,c)=>n+c.runs.length,0);
+  assert.equal(calls.length,runCount+2); // 页脚另有两次文本绘制。
+  for(const weight of ['400','700','800']){
+    assert(measured.some(f=>f.startsWith(`${weight} `)&&f.includes('Yingdu Editorial Serif')));
+    assert(calls.some(c=>c.font.startsWith(`${weight} `)&&c.font.includes('Yingdu Editorial Serif')));
+  }
+  const first=commands[0];let x=first.x;
+  for(let i=0;i<first.runs.length;i++){assert(Math.abs(calls[i].x-x)<.001);x+=first.runs[i].width+(first.runs[i].gapAfter||0);}
+  assert(Math.abs(x-1008)<.001);
+});
+test('并发打开共用同一个本地可变字体加载，加载完成后才注册',async()=>{
+  let finish,loads=0;const faces=[],fonts={add(face){faces.push(face);}};
+  class Face{constructor(name,source,options){this.name=name;this.source=source;this.options=options;}load(){loads++;return new Promise(r=>{finish=()=>r(this);});}}
+  const a=prepareEditorialFonts(fonts,Face),b=prepareEditorialFonts(fonts,Face);
+  assert.equal(loads,1);assert.equal(faces.length,0);finish();
+  const [one,two]=await Promise.all([a,b]);assert.equal(one,two);assert.equal(faces.length,1);
+  assert.equal(one.name,'Yingdu Editorial Serif');assert.equal(one.options.weight,'200 900');assert.match(one.source,/assets\/editorial-font\/NotoSerifSC.ttf/);assert(!one.source.includes('https:'));
+  await prepareEditorialFonts(fonts,Face);assert.equal(loads,1);
+});
+test('字体加载失败不注册替代字体，不自动重试，手动重开可恢复',async()=>{
+  let loads=0,fail=true;const faces=[],fonts={add(face){faces.push(face);}};
+  class Face{async load(){loads++;if(fail)throw new Error('网络不可用');return this;}}
+  await assert.rejects(prepareEditorialFonts(fonts,Face),/本地宋体字库加载失败/);
+  assert.equal(loads,1);assert.equal(faces.length,0);fail=false;
+  await prepareEditorialFonts(fonts,Face);assert.equal(loads,2);assert.equal(faces.length,1);
+  await assert.rejects(prepareEditorialFonts(null,null),/预览和导出已暂停/);
 });
 test('手动分页和末尾分隔符不额外输出空白页',()=>{
   const l=layoutArticle(base('甲\n\n---\n\n乙\n\n---'),measure);assert.equal(l.pages.length,2);assert(bodyText(l).endsWith('乙'));assert(l.pages.every(p=>p.commands.length));

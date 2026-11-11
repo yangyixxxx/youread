@@ -3,6 +3,11 @@ import {ANALYSIS_TIMEOUT_MS,compatibilityPlan,generateAnalysis,isContextLimitErr
 import {defaultSelection,firstChannelVideo} from './selection.mjs';
 import {openEditorial} from './editorial-ui.mjs';
 import {channelAvatar,bindAvatarFallback} from './channel-avatar.mjs';
+import {unreadIds,captureRead,markRead,restoreRead} from './bulk-read.mjs';
+import {channelUnreadCounts,channelIndicator} from './navigation.mjs';
+import {setupSidebarResize,SIDEBAR_LAYOUT_KEY} from './sidebar-resize.mjs';
+import {sortVideosByPublication,publicationLabel,publicationTooltip} from './video-dates.mjs';
+import {captionPoolText,poolCooling} from './caption-pool.mjs';
 
 import {outputTokens,outputLabel,waitTimeout,supportsBudget,resultMetadata,requestAIStream} from './ai.mjs';
 
@@ -34,6 +39,7 @@ const view = {filter:'all',channel:null,query:'',tab:'overview',transcriptQuery:
 let connection = null, models = [], saveQueue = Promise.resolve(), ready = false, pollBusy = false, toastTimer, connectionError = '', storeBroken = false;
 const transcriptCache = new Map();
 let pendingSelection = 'startup';
+let bulkReadPending=null,bulkReadUndo=[],bulkReadBusy=false;
 // 只补全尚未完成的默认选择；手动导航后不由后台刷新重选。
 function applyPendingSelection(){
   if(!pendingSelection)return false;
@@ -47,14 +53,14 @@ function applyPendingSelection(){
   return changed;
 }
 const icons = {
-  library:'▤',unread:'◷',saved:'☆',book:'▥'
+  library:'▤',temporary:'▷',unread:'◷',saved:'☆',book:'▥'
 };
-function allVideos(){return [...state.imports,...library.videos].filter((v,i,a)=>a.findIndex(x=>x.id===v.id)===i);}
+function allVideos(){return sortVideosByPublication([...state.imports,...library.videos].filter((v,i,a)=>a.findIndex(x=>x.id===v.id)===i));}
 function selectedVideo(){return allVideos().find(v=>v.id===view.selected);}
 function record(id){return state.records[id] ||= {read:false,favorite:false,messages:[],analysis:'',summaryParts:[]};}
 function currentTranscript(id=view.selected){return transcriptCache.get(id) || null;}
 function textCount(t){return t?.segments?.reduce((n,s)=>n+s.text.length,0)||0;}
-function shortDate(value){if(!value)return '日期未提供';const d=new Date(value);return Number.isNaN(d.valueOf())?'日期未提供':d.toLocaleDateString('zh-CN',{month:'short',day:'numeric'});}
+function videoDate(v){return `<span data-video-date="${esc(v.id)}" title="${esc(publicationTooltip(v))}">${esc(publicationLabel(v))}</span>`;}
 function clockDate(value){if(!value)return '尚未同步';const d=new Date(value);return Number.isNaN(d.valueOf())?'尚未同步':d.toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});}
 function toast(message){clearTimeout(toastTimer);$('#toast').textContent=message;$('#toast').hidden=false;toastTimer=setTimeout(()=>$('#toast').hidden=true,4400);}
 function globalError(message){$('#global-error').textContent=message;$('#global-error').hidden=!message;}
@@ -67,6 +73,8 @@ async function persist(){
 }
 function safeImage(url){try{const u=new URL(url);return u.protocol==='https:'&&/(^|\.)ytimg\.com$/.test(u.hostname)?esc(u.href):'';}catch{return '';}}
 function statusTag(v){
+  if(v.infoStatus==='pending'||v.infoStatus==='fetching')return '<span class="tag">获取视频信息中</span>';
+  if(v.infoStatus==='error')return '<span class="tag error">视频信息待重试</span>';
   const r=state.records[v.id];if(r?.analysisAttempt)return '<span class="tag error">解析未完成</span>';if(r?.analysis)return `<span class="tag ai">✦ ${r.analysisCompletion?'已解析':'已有笔记 · 待核验'}</span>`;
   if(transcriptCache.has(v.id)||v.transcriptStatus==='ready')return '<span class="tag ready">文稿就绪</span>';
   if(['fetching','pending'].includes(v.transcriptStatus))return '<span class="tag">获取字幕中</span>';
@@ -75,8 +83,14 @@ function statusTag(v){
 }
 function connectorStatusHTML(){
   if(view.connecting)return '正在连接本地服务…<br>已保存的文稿与笔记仍可阅读。';
-  if(view.online)return `${view.background?'● 本地连接器后台运行中，无需保留终端。':'● 本地连接器在线（诊断运行模式）。'}<br>关闭映读不会停止检查；可在下方停止后台更新。`;
+  if(view.online)return `${view.background?'● 本地连接器后台运行中，无需保留终端。':'● 本地连接器在线（诊断运行模式）。'}<br>关闭映读不会停止检查；可在下方停止后台更新。<br>${esc(captionPoolText(view.captionProxy))}`;
   return '○ 本地连接器未连接，本地文稿仍可阅读。<br>请稍等自动连接，或运行静默启动脚本。若仍离线，请查看 connector/background.log。';
+}
+function captionPoolView(){return `<p class="privacy caption-pool-status" role="status">${esc(captionPoolText(view.captionProxy))}</p>`;}
+function updateCaptionPoolStatus(){
+  for(const el of document.querySelectorAll('.caption-pool-status'))el.textContent=captionPoolText(view.captionProxy);
+  const button=$('[data-action="fetch-transcript"]'),v=selectedVideo();
+  if(button&&v){const fetching=['pending','fetching'].includes(v.transcriptStatus),cooling=poolCooling(view.captionProxy);button.disabled=!view.online||fetching||cooling;button.textContent=fetching?'获取中…':cooling?'出口冷却中':'获取字幕';}
 }
 function updateConnectorStatus(){
   const status=$('#connector-settings-status');if(!status)return;
@@ -86,28 +100,75 @@ function updateConnectorStatus(){
   for(const id of ['#sync-interval','#auto-captions']){const el=$(id);if(el)el.disabled=!view.online;}
 }
 function renderNavigation(){
-  const videos=allVideos();
-  const opts=[['all','全部视频',videos.length],['unread','稍后阅读',videos.filter(v=>!state.records[v.id]?.read).length],['saved','我的收藏',videos.filter(v=>state.records[v.id]?.favorite).length]];
-  $('#library-nav').innerHTML=opts.map(([id,title,n])=>`<button class="nav-item ${view.filter===id&&!view.channel?'active':''}" data-action="filter" data-value="${id}"><span class="nav-symbol">${icons[id==='all'?'library':id]}</span><span>${title}</span><span class="count">${n}</span></button>`).join('');
-  $('#channel-list').innerHTML=library.channels.length?library.channels.map(c=>`<button class="channel-item ${view.channel===c.id?'active':''}" data-action="channel" data-id="${esc(c.id)}" title="${esc(c.title)}">${channelAvatar(c,failedAvatars)}<span class="channel-name">${esc(c.title)}</span><span class="status-dot ${c.status==='error'?'error':''}" title="${esc(c.status==='error'?'同步失败':c.status==='ready'?'已订阅':'同步中')}"></span></button>`).join(''):'<p class="sidebar-empty">还没有订阅频道<br>添加你想持续阅读的创作者</p>';
+  const videos=allVideos(),unread=channelUnreadCounts(videos,state.records);
+  const opts=[['all','全部视频',videos.length],['temporary','临时视频',videos.filter(v=>v.temporary).length],['unread','稍后阅读',videos.filter(v=>!state.records[v.id]?.read).length],['saved','我的收藏',videos.filter(v=>state.records[v.id]?.favorite).length]];
+  $('#library-nav').innerHTML=opts.map(([id,title,n])=>`<button class="nav-item ${view.filter===id&&!view.channel?'active':''}" data-action="filter" data-value="${id}"><span class="nav-symbol">${icons[id==='all'?'library':id]}</span><span>${title}</span>${n?`<span class="count">${n}</span>`:''}</button>`).join('');
+  $('#channel-list').innerHTML=library.channels.length?library.channels.map(c=>`<button class="channel-item ${view.channel===c.id?'active':''}" data-action="channel" data-id="${esc(c.id)}" title="${esc(c.title)}">${channelAvatar(c,failedAvatars)}<span class="channel-name">${esc(c.title)}</span>${channelIndicator(c.status,unread.get(c.id))}</button>`).join(''):'<p class="sidebar-empty">还没有订阅频道<br>添加你想持续阅读的创作者</p>';
   $('#connector-indicator').innerHTML=`<span class="status-dot ${view.online?'':'offline'}"></span>${view.connecting?'正在连接…':view.online?'本地连接器在线':'连接器离线'}<small>设置 ↗</small>`;
   updateConnectorStatus();
+}
+function renderBulkRead(videos){
+  if(!$('#bulk-read-actions'))$('#list-meta').insertAdjacentHTML('afterend','<div id="bulk-read-actions" class="bulk-read-actions" aria-label="列表批量操作"></div>');
+  const count=unreadIds(videos,state.records).length;
+  $('#bulk-read-actions').innerHTML=`<button class="button quiet" data-action="mark-all-read" ${!count||bulkReadBusy||storeBroken?'disabled':''} title="仅标记当前频道与搜索筛选结果">✓ ${bulkReadBusy?'正在保存…':'全部标记已读'}${count?` · ${count}`:''}</button>${view.filter==='temporary'?'<button class="button quiet" data-action="add-video">＋ 添加视频</button>':''}${bulkReadUndo.length?`<button class="button quiet bulk-undo" data-action="undo-bulk-read" ${bulkReadBusy||storeBroken?'disabled':''} title="本窗口内可撤销；之后手动修改的记录不受影响">撤销上次标记 · ${bulkReadUndo.length}</button>`:''}`;
+}
+function invalidateBulkUndo(id){bulkReadUndo=bulkReadUndo.filter(x=>x.id!==id);}
+function renderReadStatus(){
+  renderNavigation();renderList();
+  const btn=$('[data-action="toggle-read"]');
+  if(btn)btn.textContent=state.records[view.selected]?.read?'✓ 已读':'◷ 标记已读';
+}
+function confirmBulkRead(){
+  if(bulkReadBusy||storeBroken)return;
+  const videos=filterVideos(allVideos(),state.records,view.filter,view.channel,view.query);
+  const ids=unreadIds(videos,state.records);if(!ids.length)return;
+  const channel=library.channels.find(c=>c.id===view.channel);
+  const scope=(channel?`频道「${channel.title}」`:({all:'全部视频',temporary:'临时视频',unread:'稍后阅读',saved:'我的收藏'}[view.filter]))+(view.query?` · 搜索「${view.query}」`:'');
+  bulkReadPending=ids;
+  dialog('全部标记为已读？',`范围：${esc(scope)}。将标记当前列表中的 ${ids.length} 条未读内容，不影响其他内容、新到达的视频、收藏或笔记。保存后可在本窗口撤销。`,`<div id="dialog-error" class="dialog-error" role="alert"></div><div class="dialog-actions"><button class="button" data-action="close-dialog" autofocus>取消</button><button class="button primary" data-action="confirm-bulk-read">标记 ${ids.length} 条为已读</button></div>`);
+}
+async function saveBulkRead(undo=false){
+  if(bulkReadBusy||storeBroken)return;
+  if(view.activeAI)throw new Error('请等待当前生成结束，再批量修改阅读状态。');
+  if(!undo&&(!bulkReadPending||!$('#app-dialog').open))return;
+  const live=new Set(allVideos().map(v=>v.id));
+  const previousUndo=bulkReadUndo;
+  const undoTargets=bulkReadUndo.filter(x=>live.has(x.id)&&state.records[x.id]?.read);
+  const changes=undo?captureRead(state.records,undoTargets.map(x=>x.id)):markRead(state.records,(bulkReadPending||[]).filter(id=>live.has(id)));
+  if(undo)restoreRead(state.records,undoTargets);
+  bulkReadBusy=true;renderBulkRead(filterVideos(allVideos(),state.records,view.filter,view.channel,view.query));
+  for(const button of $('#app-dialog').querySelectorAll('button'))button.disabled=true;
+  try{
+    await persist();
+    bulkReadUndo=undo?[]:changes;
+    bulkReadBusy=false;closeDialog();renderReadStatus();
+    toast(undo?`已撤销 ${undoTargets.length} 条标记`:`已将 ${changes.length} 条内容标记为已读`);
+  }catch(error){
+    restoreRead(state.records,changes);bulkReadUndo=previousUndo;
+    globalError('批量操作未保存，已恢复原阅读状态；请检查本地存储后重试。');
+    throw error;
+  }finally{
+    bulkReadBusy=false;renderReadStatus();
+    for(const button of $('#app-dialog').querySelectorAll('button'))button.disabled=false;
+  }
 }
 function renderList(){
   const channel=library.channels.find(c=>c.id===view.channel);
   if(view.channel&&!channel)view.channel=null;
-  const title=channel?.title||({all:'全部视频',unread:'稍后阅读',saved:'我的收藏'}[view.filter]);
+  const title=channel?.title||({all:'全部视频',temporary:'临时视频',unread:'稍后阅读',saved:'我的收藏'}[view.filter]);
   const videos=filterVideos(allVideos(),state.records,view.filter,view.channel,view.query);
   $('#list-title').innerHTML=`${esc(title)} <span id="list-count">${videos.length}</span>`;
-  $('#list-meta').innerHTML=`<span>${view.query?'搜索结果':view.channel?'此频道的近期视频':'按发现时间排列'}</span><span>${videos.filter(v=>!state.records[v.id]?.read).length} 个未读</span>`;
+  $('#list-meta').innerHTML=`<span>${view.query?'搜索结果 · ':''}按发布时间 · 最新在前</span><span>${videos.filter(v=>!state.records[v.id]?.read).length} 个未读</span>`;
+  renderBulkRead(videos);
   $('#sync-button').disabled=!view.online||view.syncBusy||!library.channels.length;
   $('#sync-button').innerHTML=view.syncBusy?'<span class="spin">↻</span>':'↻';
   if(!videos.length){
     const hasAny=allVideos().length>0;
-    $('#video-list').innerHTML=`<div class="list-empty"><div class="empty-circle">${view.filter==='saved'?'☆':'▤'}</div><h3>${view.query?'没有找到相关视频':hasAny?'这里暂时没有视频':library.channels.length?'正在等候频道内容':'订阅你的第一个频道'}</h3><p>${view.query?'试试其他关键词，或清空当前筛选。':hasAny?'试试切换频道或返回全部视频。':library.channels.length?'连接器将检查近期视频。同步失败时可在频道管理中查看原因。':'把喜欢的创作者放在这里，更新的视频会成为你的下一份阅读材料。'}</p>${hasAny||view.query?'<button class="button subtle" data-action="clear-filters">查看全部视频</button>':library.channels.length?'<button class="button subtle" data-action="channels">查看同步状态</button>':'<button class="button subtle" data-action="add-channel">＋ 订阅频道</button>'}</div>`;
+    if(view.filter==='temporary'&&!view.query){$('#video-list').innerHTML='<div class="list-empty"><div class="empty-circle">▷</div><h3>只读一条视频，也可以</h3><p>复制视频链接到这里，获取文稿后继续阅读，不用订阅整个频道。</p><button class="button subtle" data-action="add-video">＋ 添加视频链接</button></div>';}
+    else $('#video-list').innerHTML=`<div class="list-empty"><div class="empty-circle">${view.filter==='saved'?'☆':'▤'}</div><h3>${view.query?'没有找到相关视频':hasAny?'这里暂时没有视频':library.channels.length?'正在等候频道内容':'订阅你的第一个频道'}</h3><p>${view.query?'试试其他关键词，或清空当前筛选。':hasAny?'试试切换频道或返回全部视频。':library.channels.length?'连接器将检查近期视频。同步失败时可在频道管理中查看原因。':'把喜欢的创作者放在这里，更新的视频会成为你的下一份阅读材料。'}</p>${hasAny||view.query?'<button class="button subtle" data-action="clear-filters">查看全部视频</button>':library.channels.length?'<button class="button subtle" data-action="channels">查看同步状态</button>':'<button class="button subtle" data-action="add-channel">＋ 订阅频道</button>'}</div>`;
   }else $('#video-list').innerHTML=videos.map(v=>{
     const r=state.records[v.id]||{};const img=safeImage(v.thumbnail);
-    return `<button class="video-item ${view.selected===v.id?'selected':''}" data-action="select-video" data-id="${esc(v.id)}" aria-pressed="${view.selected===v.id}"><div class="video-row"><div class="video-thumb">${img?`<img src="${img}" alt="" loading="lazy" referrerpolicy="no-referrer">`:'▤'}${v.duration?`<span class="duration">${formatTime(v.duration)}</span>`:''}</div><div class="video-info"><h3>${esc(v.title)}</h3><div class="video-byline"><span>${esc(v.channelTitle||'本地文稿')}</span>${r.favorite?'<span>★</span>':''}</div></div></div><div class="video-item-bottom">${statusTag(v)}<span>${r.read?'已读':'● 未读'}</span><span class="time-ago">${v.local?'本地导入':shortDate(v.publishedAt)}</span></div></button>`;
+    return `<button class="video-item ${view.selected===v.id?'selected':''}" data-action="select-video" data-id="${esc(v.id)}" aria-pressed="${view.selected===v.id}"><div class="video-row"><div class="video-thumb">${img?`<img src="${img}" alt="" loading="lazy" referrerpolicy="no-referrer">`:'▤'}${v.duration?`<span class="duration">${formatTime(v.duration)}</span>`:''}</div><div class="video-info"><h3>${esc(v.title)}</h3><div class="video-byline"><span>${esc(v.channelTitle||'本地文稿')}</span>${r.favorite?'<span>★</span>':''}</div></div></div><div class="video-item-bottom">${statusTag(v)}<span>${r.read?'已读':'● 未读'}</span><span class="time-ago">${videoDate(v)}</span></div></button>`;
   }).join('');
   $('#list-footer').textContent=view.online?`每 ${library.settings.intervalMinutes} 分钟检查 · ${library.lastSync?'上次 '+clockDate(library.lastSync):'尚未同步'}`:'本地文稿可继续阅读 · 连接器离线';
 }
@@ -115,13 +176,15 @@ const bookArt=`<svg class="welcome-art" viewBox="0 0 220 155" fill="none" aria-h
 function welcome(){return `<div class="reader-welcome">${bookArt}<span class="welcome-kicker">WATCH LESS. UNDERSTAND MORE.</span><h2>把视频，读成自己的知识。</h2><p class="welcome-description">让字幕成为文稿，让观点清晰可见。<br>从一个频道开始，用阅读和对话深入理解。</p><div class="welcome-actions"><button class="button primary" data-action="add-channel">＋ 订阅一个频道</button><button class="button quiet" data-action="import-new">或导入文稿 ↗</button></div><div class="steps"><div class="step"><div class="step-number">01 / COLLECT</div><strong>订阅感兴趣的频道</strong>在本机检查视频更新</div><div class="step"><div class="step-number">02 / READ</div><strong>从字幕到核心观点</strong>带时间戳的文稿解析</div><div class="step"><div class="step-number">03 / THINK</div><strong>用对话深入理解</strong>追问，让知识真正留下</div></div></div><div class="welcome-bottom">本地资料库 <span> · </span> 由你选择的 AI 模型辅助阅读</div>`;}
 function readerHeader(v){
   const r=record(v.id),t=currentTranscript(v.id);
-  return `<div class="reader-head"><div class="reader-topline"><div class="reader-breadcrumb"><button class="button quiet reader-back" data-action="back">‹ 视频列表</button>${esc(v.channelTitle||'本地文稿')} <span> / </span> 视频精读</div><div class="reader-actions"><button class="button quiet" data-action="toggle-read">${r.read?'✓ 已读':'◷ 标记已读'}</button><button class="button ${r.favorite?'subtle':'quiet'}" data-action="favorite" aria-pressed="${!!r.favorite}">${r.favorite?'★ 已收藏':'☆ 收藏'}</button>${v.local?`<button class="button quiet" data-action="remove-local" ${view.activeAI?.id===v.id?'disabled':''}>移除</button>`:''}</div></div><h2 class="reader-title">${esc(v.title)}</h2><div class="reader-metadata"><span>${v.local?'本地导入':shortDate(v.publishedAt)}</span>${v.duration?`<span>◷ ${formatTime(v.duration)}</span>`:''}<span>${t?`${t.segments.length} 段文稿 · ${textCount(t).toLocaleString()} 字符`:v.transcriptStatus==='ready'?'字幕已就绪':'等待文稿'}</span>${v.url?`<a href="${esc(v.url)}" target="_blank" rel="noopener noreferrer">在 YouTube 打开 ↗</a>`:''}</div></div><div class="tabs" role="tablist" aria-label="阅读模式">${[['overview','概览解析','✦'],['transcript','视频文稿','≡'],['chat','阅读对话','◌']].map(([id,name,icon])=>`<button role="tab" aria-selected="${view.tab===id}" class="tab ${view.tab===id?'active':''}" data-action="tab" data-value="${id}">${icon} ${name}${id==='chat'&&r.messages?.length?`<small>${r.messages.length}</small>`:''}</button>`).join('')}<button class="tab editorial-entry" data-action="editorial" ${view.activeAI?.id===v.id?'disabled title="请等待当前生成结束后再排版"':''}>▧ 图文排版 ↗</button></div>`;
+  return `<div class="reader-head"><div class="reader-topline"><div class="reader-breadcrumb"><button class="button quiet reader-back" data-action="back">‹ 视频列表</button>${esc(v.channelTitle||'本地文稿')} <span> / </span> 视频精读</div><div class="reader-actions"><button class="button quiet" data-action="toggle-read">${r.read?'✓ 已读':'◷ 标记已读'}</button><button class="button ${r.favorite?'subtle':'quiet'}" data-action="favorite" aria-pressed="${!!r.favorite}">${r.favorite?'★ 已收藏':'☆ 收藏'}</button>${v.temporary?`<button class="button quiet" data-action="remove-temporary" ${!view.online?'disabled':''}>移出临时目录</button>`:''}${v.local?`<button class="button quiet" data-action="remove-local" ${view.activeAI?.id===v.id?'disabled':''}>移除</button>`:''}</div></div><h2 class="reader-title">${esc(v.title)}</h2><div class="reader-metadata">${videoDate(v)}${v.duration?`<span>◷ ${formatTime(v.duration)}</span>`:''}<span>${t?`${t.segments.length} 段文稿 · ${textCount(t).toLocaleString()} 字符`:v.transcriptStatus==='ready'?'字幕已就绪':'等待文稿'}</span>${v.url?`<a href="${esc(v.url)}" target="_blank" rel="noopener noreferrer">在 YouTube 打开 ↗</a>`:''}</div></div><div class="tabs" role="tablist" aria-label="阅读模式">${[['overview','概览解析','✦'],['transcript','视频文稿','≡'],['chat','阅读对话','◌']].map(([id,name,icon])=>`<button role="tab" aria-selected="${view.tab===id}" class="tab ${view.tab===id?'active':''}" data-action="tab" data-value="${id}">${icon} ${name}${id==='chat'&&r.messages?.length?`<small>${r.messages.length}</small>`:''}</button>`).join('')}<button class="tab editorial-entry" data-action="editorial" ${view.activeAI?.id===v.id?'disabled title="请等待当前生成结束后再排版"':''}>▧ 图文排版 ↗</button></div>`;
 }
 function missingTranscript(v){
   if(view.transcriptLoading)return '<div class="notice">正在读取已保存的文稿…<div class="loading-bar"><span></span></div></div>';
   const fetching=['fetching','pending'].includes(v.transcriptStatus);
   const err=view.transcriptError||v.transcriptError;
-  return `<div class="analysis-empty"><div class="mini-icon">≡</div><h3>${fetching?'正在获取视频字幕':'先为这条视频准备文稿'}</h3><p>${fetching?'连接器正在检查可用的人工字幕与自动字幕。你可以先阅读其他视频，完成后这里会自动更新。':'获取 YouTube 中的可用字幕，或导入你已有的 SRT、VTT、TXT 文件。没有字幕的视频不会凭空生成内容。'}</p>${err?`<div class="notice error">${esc(err)}</div>`:''}<div class="welcome-actions" style="margin-top:12px">${!v.local?`<button class="button primary" data-action="fetch-transcript" ${!view.online||fetching?'disabled':''}>${fetching?'获取中…':'获取字幕'}</button>`:''}<button class="button" data-action="import-current">导入文稿</button></div>${!view.online&&!v.local?'<p class="privacy">连接器未启动，仍可导入本地文稿。<button class="inline-link" data-action="settings">查看连接方法</button></p>':''}</div>`;
+  if(v.infoStatus==='pending'||v.infoStatus==='fetching')return '<div class="notice" role="status">正在获取视频标题、日期与来源信息，完成后会尝试获取字幕。不会调用 AI。<div class="loading-bar"><span></span></div></div>';
+  if(v.infoStatus==='error')return `<div class="notice error" role="status">视频信息获取失败：${esc(v.infoError||'请检查网络后重试')}<p>条目与已有阅读资料保留，没有自动重试或调用AI。</p><button class="button" data-action="retry-video" ${!view.online?'disabled':''}>重试视频信息</button><button class="button quiet" data-action="import-current">导入文稿</button></div>`;
+  return `<div class="analysis-empty"><div class="mini-icon">≡</div><h3>${fetching?'正在获取视频字幕':'先为这条视频准备文稿'}</h3><p>${fetching?'连接器正在检查可用的人工字幕与自动字幕。你可以先阅读其他视频，完成后这里会自动更新。':'获取 YouTube 中的可用字幕，或导入你已有的 SRT、VTT、TXT 文件。没有字幕的视频不会凭空生成内容。'}</p>${err?`<div class="notice error">${esc(err)}</div>`:''}${captionPoolView()}<div class="welcome-actions" style="margin-top:12px">${!v.local?`<button class="button primary" data-action="fetch-transcript" ${!view.online||fetching||poolCooling(view.captionProxy)?'disabled':''}>${fetching?'获取中…':poolCooling(view.captionProxy)?'出口冷却中':'获取字幕'}</button>`:''}<button class="button" data-action="import-current">导入文稿</button></div>${!view.online&&!v.local?'<p class="privacy">连接器未启动，仍可导入本地文稿。<button class="inline-link" data-action="settings">查看连接方法</button></p>':''}</div>`;
 }
 function overview(v){
   const r=record(v.id),t=currentTranscript(v.id),busy=view.activeAI?.id===v.id;
@@ -197,16 +260,25 @@ async function connect(manual=false){
   }catch(e){view.online=false;connectionError='无法连接本地服务。请运行 start-connector-silent.vbs 静默启动，再点击重新连接；已有资料保留。';if(manual)toast(connectionError);}
   finally{view.connecting=false;renderNavigation();renderList();if(selectedVideo()&&!currentTranscript())renderReader();}
 }
-async function refreshLibrary(){
+let refreshQueue=Promise.resolve();
+function refreshLibrary(){
+  const task=refreshQueue.catch(()=>{}).then(refreshLibraryNow);
+  refreshQueue=task;
+  return task;
+}
+async function refreshLibraryNow(){
   const health=await api('/health');
   if(!health.ok||!health.workerRunning)throw new Error('连接器后台检查未就绪，请检查运行日志。');
   view.background=health.background===true;
+  view.captionProxy=health.captionProxy||null;updateCaptionPoolStatus();
   const fresh=await api('/library');
   if(!Array.isArray(fresh.channels)||!Array.isArray(fresh.videos))throw new Error('连接器返回的数据格式不正确。');
   view.online=true;
   const signature=JSON.stringify(fresh);
   if(signature!==view.librarySignature){library=fresh;view.librarySignature=signature;const selectionChanged=applyPendingSelection();await sdk.data.set('yingdu.library-cache.v1',fresh);renderNavigation();renderList();
     if(selectionChanged)renderReader();
+    // 仅替换日期文字，不重建正在阅读的正文、流式区或对话输入。
+    for(const node of document.querySelectorAll('#reader [data-video-date]')){const item=selectedVideo();if(item&&node.dataset.videoDate===item.id)node.outerHTML=videoDate(item);}
     const v=selectedVideo();if(v?.transcriptStatus==='ready'&&!currentTranscript(v.id))await loadTranscript(v.id);else if(v&&!currentTranscript(v.id))renderReader();
     if($('#app-dialog').open&&$('#channel-manager'))renderChannelManager();
   }
@@ -224,6 +296,7 @@ async function loadTranscript(id){
   finally{if(view.selected===id){view.transcriptLoading=false;renderReader();}}
 }
 async function selectVideo(id){
+  invalidateBulkUndo(id);
   pendingSelection=null;
   view.selected=id;state.selectedId=id;view.tab='overview';view.transcriptQuery='';view.aiError='';view.transcriptError='';record(id).read=true;
   $('.workspace').classList.add('show-reader');$('#sidebar').classList.remove('open');render();await persist();await loadTranscript(id);
@@ -232,8 +305,10 @@ function dialog(title,description,body){
   const d=$('#app-dialog');$('#dialog-body').innerHTML=`<button class="icon-button dialog-close" data-action="close-dialog" aria-label="关闭弹窗">×</button><h2 id="dialog-title">${title}</h2><p class="dialog-description">${description}</p>${body}`;
   if(!d.open)d.showModal();
 }
-function closeDialog(){ $('#app-dialog').close(); }
+function closeDialog(){if(bulkReadBusy)return;bulkReadPending=null;$('#app-dialog').close();}
+$('#app-dialog').addEventListener('cancel',event=>{if(bulkReadBusy)event.preventDefault();else bulkReadPending=null;});
 function dialogError(text){const el=$('#dialog-error');if(el)el.textContent=text;else toast(text);}
+function addVideoDialog(){dialog('添加临时视频','粘贴单条视频链接，不必订阅整个频道。视频会保存在临时目录，也可继续解析、对话和图文排版。',`<form id="video-form"><label class="field">YouTube 视频链接<input type="url" id="video-url" required autofocus maxlength="2048" placeholder="https://www.youtube.com/watch?v=…" autocomplete="off"><small>支持 watch、youtu.be 分享链接、Shorts 和直播回放。</small></label><div class="notice">通过本地连接器获取标题、日期及可用字幕，不调用付费数据接口或 AI。网络受限或没有字幕时可导入文稿；不会修改你的频道订阅。</div>${!view.online?'<p class="notice error">连接器离线，请在设置中重新连接；已保存的视频仍可阅读。</p>':''}<div id="dialog-error" class="dialog-error" role="alert"></div><div class="dialog-actions"><button type="button" class="button" data-action="close-dialog">取消</button><button type="submit" class="button primary" ${!view.online?'disabled':''}>添加并获取字幕</button></div></form>`);}
 function addChannelDialog(){dialog('订阅一个频道','把持续关注的创作者加入资料库。连接器会检查近期视频，并尝试获取可用字幕。',`<form id="channel-form"><label class="field">YouTube 频道<input id="channel-url" name="channel" placeholder="@频道名 或 https://youtube.com/@…" required autofocus autocomplete="off"><small>支持 @handle、频道主页链接和 UC 频道 ID，不支持视频链接。</small></label>${!view.online?'<div class="notice error">连接器未连接。请先启动本地连接器。<button type="button" class="inline-link" data-action="settings">查看启动方法</button></div>':'<div class="notice">首次读取最多 20 条近期视频，自动尝试最新 3 条新视频的字幕。无字幕或访问受限时可手动导入。不会自动发起 AI 请求。</div>'}<div id="dialog-error" class="dialog-error" role="alert"></div><div class="dialog-actions"><button type="button" class="button" data-action="close-dialog">取消</button><button id="channel-submit" type="submit" class="button primary" ${!view.online?'disabled':''}>订阅并检查更新</button></div></form>`);}
 function importDialog(current=false){
   const v=current?selectedVideo():null;
@@ -248,7 +323,13 @@ function channelsDialog(){dialog('管理订阅频道','这里的订阅保存在�
 function settingsDialog(){
   dialog('阅读与同步设置','模型使用 NewMax 当前配置；应用不保存任何模型密钥。',`<div id="connector-settings-status" class="notice ${view.online?'':'error'}" role="status">${connectorStatusHTML()}</div><div class="settings-section"><h3>自动静默运行</h3><p class="dialog-description">登录自启由 Windows 当前用户启动项管理，无需保留终端。连接器每次只运行一份，不会自动生成 AI 解析。</p><details><summary>手动启动与自启管理</summary><p class="dialog-description">异常离线时双击静默启动脚本；本窗口每 5 秒检查连接状态。</p><div class="script-path">C:/Users/admin/.newmax/apps/app-f73ecc67-75cb-4381-b4ea-e829470dba1b/start-connector-silent.vbs</div><p class="dialog-description">同一目录中：enable-connector-autostart.cmd 启用登录自启；disable-connector-autostart.cmd 取消登录自启（不立即停止当前进程）。启动失败日志位于本应用数据目录 connector/background.log。</p></details><div class="dialog-actions" style="margin-top:10px"><button class="button" data-action="reconnect">重新连接</button><button class="button quiet" data-action="stop-connector" ${view.online?'':'disabled'}>停止后台更新</button></div></div><form id="settings-form"><div class="settings-section"><h3>自动同步</h3><label class="setting-row"><div>检查间隔<small>仅在连接器运行时生效</small></div><select id="sync-interval" ${view.online?'':'disabled'}>${[5,15,30,60,120,360,1440].map(n=>`<option value="${n}" ${library.settings.intervalMinutes===n?'selected':''}>${n<60?n+' 分钟':n/60+' 小时'}</option>`).join('')}</select></label><label class="setting-row"><div>自动获取新视频字幕<small>每次最多尝试 3 条；不下载视频媒体</small></div><input id="auto-captions" type="checkbox" ${library.settings.autoCaptions?'checked':''} ${view.online?'':'disabled'}></label></div><div class="settings-section"><label class="field">解析与对话模型<select id="model-select"><option value="">跟随 NewMax 默认模型</option>${models.map(m=>`<option value="${esc(m.providerId+'::'+m.model)}" ${state.model===m.providerId+'::'+m.model?'selected':''}>${esc(m.providerName+' / '+m.model)}</option>`).join('')}</select><small>点击“生成解析”或“发送”才提交文稿。云端模型可能产生费用；应用不自动重试或换模型。</small></label>${runtimeNotice()}<label class="field">输出预算<select id="output-mode"><option value="auto" ${selectedBudget()==='auto'?'selected':''}>自动（不设应用固定上限）</option><option value="custom" ${selectedBudget()!=='auto'?'selected':''}>自定义输出上限</option></select><small>自动使用服务默认或根据已配置上下文与输入计数分配剩余空间；不是无限输出，也不会把 192K 全部用作输出。旧版 4000/8000 设置不再生效。</small></label><label class="field" id="custom-output-field" ${selectedBudget()==='auto'?'hidden':''}>自定义 tokens<input id="output-tokens" type="number" min="1" step="1" value="${selectedBudget()==='auto'?'':selectedBudget()}" placeholder="输入所需上限，不再限制为 8000"><small>受模型自身能力限制，服务拒绝时不会自动降低额度重试。</small></label><label class="field">单次最长等待（分钟）<input id="wait-minutes" type="number" min="1" max="35791" step="1" value="${Math.round(selectedTimeout()/60000)}" required><small>默认 15 分钟；等待超时不保证远端取消。生成或重试均可能产生费用。</small></label></div><div id="dialog-error" class="dialog-error" role="alert"></div><div class="dialog-actions"><button type="button" class="button" data-action="close-dialog">关闭</button><button type="submit" class="button primary">保存设置</button></div></form>`);
 }
+async function inspectHost(){
+  try{const report=await sdk.capabilities?.inspect();return report?.version==='host-capabilities-v1'?report:null;}catch{return null;}
+}
 async function modelArgs(){
+  const report=await inspectHost(), capability=report?.capabilities?.find(c=>c.id==='ai.stream');
+  if(capability&&['permission_denied','unsupported','not_configured'].includes(capability.status))throw new Error('当前宿主AI流式能力：'+capability.status+'。请检查应用权限与模型配置；未提交请求。');
+  if(!capability||capability.status==='unknown')toast('宿主暂无法预验证模型授权；本次由你的明确操作提交，实际可用性以返回结果为准。');
   runtimeCapabilities=null;
   const catalog=await sdk.ai.listModels();models=catalog?.models||[];runtimeCapabilities=catalog?.capabilities||null;
   if(!supportsBudget({capabilities:runtimeCapabilities}))throw new Error('请先更新并重启 NewMax，当前进程尚未支持自动预算与真实结束状态。本次未发送模型请求。');
@@ -289,7 +370,7 @@ async function callAI(prompt,args){
   }finally{clearTimeout(paintTimer);clearTimeout(saveTimer);}
 }
 async function analyze(mode='full'){
-  const v=selectedVideo(),t=currentTranscript();if(!v||!t||view.activeAI)return;
+  const v=selectedVideo(),t=currentTranscript();if(!v||!t||view.activeAI||bulkReadBusy)return;
   const r=record(v.id);
   const previous={analysis:r.analysis,analysisModel:r.analysisModel,analysisAt:r.analysisAt,analysisMode:r.analysisMode,analysisCompletion:r.analysisCompletion,analysisAttempt:r.analysisAttempt};
   view.activeAI={id:v.id,type:'analysis',mode,text:''};view.aiError='';view.aiProgress='正在准备文稿与模型…';renderReader();
@@ -317,7 +398,7 @@ async function analyze(mode='full'){
   finally{view.activeAI=null;view.aiProgress='';renderList();if(view.selected===v.id)renderReader();}
 }
 async function sendChat(){
-  const v=selectedVideo(),t=currentTranscript();if(!v||!t||view.activeAI)return;
+  const v=selectedVideo(),t=currentTranscript();if(!v||!t||view.activeAI||bulkReadBusy)return;
   const question=(view.chatDrafts[v.id]||'').trim();if(!question){toast('先写下想了解的问题。');$('#chat-input')?.focus();return;}
   const r=record(v.id);const built=chatPrompt(v.title,question,t.segments,(r.analysisCompletion?'':'【以下旧解析完整性未确认，仅作参考】\n')+(r.analysis||''),r.messages||[]);
   view.activeAI={id:v.id,type:'chat',question,text:''};view.aiProgress=`正在根据${built.scope}回答 · 流式返回`;view.aiError='';renderReader();
@@ -329,8 +410,12 @@ function download(name,text,type='text/plain;charset=utf-8'){
   const blob=new Blob([text],{type});const u=URL.createObjectURL(blob);const a=document.createElement('a');a.href=u;a.download=name.replace(/[<>:"/\\|?*]/g,'_');a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);
 }
 async function dispatch(action,el){
+  if(bulkReadBusy)return;
   const id=el?.dataset.id,value=el?.dataset.value;
   switch(action){
+    case 'mark-all-read':confirmBulkRead();break;
+    case 'confirm-bulk-read':await saveBulkRead();break;
+    case 'undo-bulk-read':await saveBulkRead(true);break;
     case 'menu':$('#sidebar').classList.toggle('open');break;
     case 'back':$('.workspace').classList.remove('show-reader');break;
     case 'filter':pendingSelection=null;view.filter=value;view.channel=null;$('#sidebar').classList.remove('open');$('.workspace').classList.remove('show-reader');renderNavigation();renderList();break;
@@ -343,6 +428,10 @@ async function dispatch(action,el){
     case 'select-video':await selectVideo(id);break;
     case 'tab':view.tab=value;view.aiError='';renderReader();break;
     case 'close-dialog':closeDialog();break;
+    case 'add-video':addVideoDialog();break;
+    case 'retry-video':{const v=selectedVideo();if(!v)return;el.disabled=true;await api('/videos','POST',{url:v.url});await refreshLibrary();toast('已加入视频信息获取队列');break;}
+    case 'remove-temporary':{const v=selectedVideo();if(!v)return;dialog('移出临时目录？',`仅移除「${esc(v.title)}」的临时归类。视频、字幕、解析、对话和排版继续保留在全部视频中。`,`<div class="dialog-actions"><button class="button" data-action="close-dialog">取消</button><button class="button primary" data-action="confirm-remove-temporary" data-id="${esc(v.id)}">移出目录并保留资料</button></div>`);break;}
+    case 'confirm-remove-temporary':el.disabled=true;await api(`/videos/${encodeURIComponent(id)}`,'PATCH',{temporary:false});await refreshLibrary();closeDialog();renderReader();toast('已移出临时目录，资料仍保留');break;
     case 'add-channel':addChannelDialog();break;
     case 'channels':channelsDialog();break;
     case 'settings':settingsDialog();break;
@@ -360,7 +449,7 @@ async function dispatch(action,el){
     }
     case 'confirm-unsubscribe':el.disabled=true;await api(`/channels/${encodeURIComponent(id)}`,'DELETE');await refreshLibrary();channelsDialog();toast('已停止更新，已有资料保留');break;
     case 'favorite':{const v=selectedVideo();if(v){record(v.id).favorite=!record(v.id).favorite;await persist();render();}break;}
-    case 'toggle-read':{const v=selectedVideo();if(v){record(v.id).read=!record(v.id).read;await persist();render();}break;}
+    case 'toggle-read':{const v=selectedVideo();if(v){invalidateBulkUndo(v.id);record(v.id).read=!record(v.id).read;await persist();render();}break;}
     case 'fetch-transcript':{const v=selectedVideo();if(v){el.disabled=true;await api(`/videos/${encodeURIComponent(v.id)}/transcript`,'POST',{});await refreshLibrary();toast('已加入字幕获取队列');}break;}
     case 'timestamp':{const v=selectedVideo();if(v?.url&&el.dataset.time!==''){const u=new URL(v.url);u.searchParams.set('t',Math.floor(Number(el.dataset.time))+'s');window.open(u.href,'_blank','noopener,noreferrer');}break;}
     case 'cite':{const t=currentTranscript();if(!t)return;const sec=Number(el.dataset.time);let idx=0;for(let i=0;i<t.segments.length;i++)if(t.segments[i].start!==null&&t.segments[i].start<=sec)idx=i;view.tab='transcript';view.transcriptQuery='';renderReader();const row=$(`#segment-${idx}`);row?.classList.add('active');row?.scrollIntoView({block:'center'});break;}
@@ -404,9 +493,17 @@ document.addEventListener('keydown',e=>{
   if(e.target.id==='chat-input'&&e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();sendChat();}
 });
 document.addEventListener('submit',async e=>{
-  e.preventDefault();const form=e.target;const submit=form.querySelector('[type=submit]');if(submit?.disabled)return;
+  e.preventDefault();if(bulkReadBusy)return;const form=e.target;const submit=form.querySelector('[type=submit]');if(submit?.disabled)return;
   try{
-    if(form.id==='channel-form'){
+    if(form.id==='video-form'){
+      const url=videoURL($('#video-url').value);if(!url)throw new Error('请粘贴YouTube视频链接。');
+      submit.disabled=true;submit.textContent='正在添加…';
+      const response=await api('/videos','POST',{url});
+      pendingSelection=null;view.filter='temporary';view.channel=null;view.query='';$('#video-search').value='';
+      await refreshLibrary();closeDialog();view.selected=response.video.id;view.tab='overview';view.aiError='';view.transcriptQuery='';
+      $('.workspace').classList.add('show-reader');$('#sidebar').classList.remove('open');render();await loadTranscript(response.video.id);
+      toast(response.duplicate?'已打开已有视频，未重复创建或覆盖阅读资料':'视频已加入临时目录，正在获取信息和字幕');
+    }else if(form.id==='channel-form'){
       const url=normalizeChannel($('#channel-url').value);submit.disabled=true;submit.textContent='正在添加…';
       const response=await api('/channels','POST',{url});await refreshLibrary();closeDialog();toast(response.duplicate?'这个频道已经在订阅库中':'频道已加入，正在检查近期视频');
     }else if(form.id==='import-form'){
@@ -415,7 +512,7 @@ document.addEventListener('submit',async e=>{
       const transcript=parseTranscript($('#import-text').value,$('#import-text').dataset.filename||'');
       submit.disabled=true;const id=form.dataset.video||`local-${crypto.randomUUID()}`;
       if(!form.dataset.video)state.imports.unshift({id,title,url,channelId:'local',channelTitle:'本地文稿',publishedAt:new Date().toISOString(),duration:transcript.segments.at(-1)?.end,thumbnail:'',transcriptStatus:'ready',local:true});
-      const r=record(id);r.analysis='';r.analysisCompletion=null;r.analysisAttempt=null;r.chatAttempt=null;r.summaryParts=[];r.messages=[];r.read=true;
+      invalidateBulkUndo(id);const r=record(id);r.analysis='';r.analysisCompletion=null;r.analysisAttempt=null;r.chatAttempt=null;r.summaryParts=[];r.messages=[];r.read=true;
       await sdk.data.set(`yingdu.transcript.${id}`,transcript);transcriptCache.set(id,transcript);await persist();closeDialog();await selectVideo(id);view.tab='transcript';renderReader();toast('文稿已保存在本机');
     }else if(form.id==='settings-form'){
       const maxTokens=$('#output-mode').value==='auto'?'auto':Number($('#output-tokens').value);
@@ -427,7 +524,7 @@ document.addEventListener('submit',async e=>{
       state.model=$('#model-select').value;state.outputBudget={maxTokens,timeoutMs:minutes*60000};await persist();if(view.online)await refreshLibrary();closeDialog();renderReader();toast('设置已保存');
     }
   }catch(err){dialogError(err.message||'操作失败，请重试。');}
-  finally{if(submit?.isConnected){submit.disabled=false;if(form.id==='channel-form')submit.textContent='订阅并检查更新';}}
+  finally{if(submit?.isConnected){submit.disabled=false;if(form.id==='channel-form')submit.textContent='订阅并检查更新';if(form.id==='video-form')submit.textContent='添加并获取字幕';}}
 });
 function applyBrand(bootstrap){
   const b=bootstrap?.app||bootstrap||{};
@@ -438,12 +535,15 @@ function applyBrand(bootstrap){
 async function init(){
   render();
   if(!sdk){globalError('请在 NewMax 的应用窗口中打开此应用，普通浏览器没有本地保存与 AI 接口。');view.connecting=false;render();return;}
+  const host=await inspectHost();
+  if(!host)globalError('暂时无法确认宿主能力；本地功能会按实际读取结果显示，AI生成前将再次检查。');
   try{
     const saved=await sdk.data.get(DATA_KEY);if(saved){if(typeof saved!=='object'||!saved.records||!Array.isArray(saved.imports))throw new Error('数据格式不正确');state={...state,...saved};}
     const cached=await sdk.data.get('yingdu.library-cache.v1');if(cached?.channels&&cached?.videos)library=cached;
     applyPendingSelection();
     for(const [id,r] of Object.entries(state.records))if(r.chatAttempt?.question)view.chatDrafts[id]=r.chatAttempt.question;
   }catch(e){storeBroken=true;globalError('本地资料加载失败。为保护已有数据，写入已暂停；请重新打开应用。');}
+  setupSidebarResize({document,window,load:()=>sdk.data.get(SIDEBAR_LAYOUT_KEY),save:value=>sdk.data.set(SIDEBAR_LAYOUT_KEY,value),onError:toast});
   try{applyBrand(await sdk.app.getBootstrap());sdk.app.onChanged?.(applyBrand);}catch{}
   try{const catalog=await sdk.ai.listModels();models=catalog.models||[];runtimeCapabilities=catalog.capabilities||null;}catch{}
   ready=true;render();if(view.selected)await loadTranscript(view.selected);await connect();

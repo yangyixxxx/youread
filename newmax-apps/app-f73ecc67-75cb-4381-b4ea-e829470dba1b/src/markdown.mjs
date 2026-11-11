@@ -1,4 +1,5 @@
 import MarkdownIt from './vendor/markdown-it.mjs';
+import {timeCitations} from './time-citations.mjs';
 
 // 仅负责展示：不改变保存正文，不执行 HTML，不加载远程图片。
 const md = new MarkdownIt({html:false,breaks:false,linkify:false,typographer:false});
@@ -71,16 +72,14 @@ md.core.ruler.after('inline','time_citations',state => {
       if (token.type === 'link_close') linkDepth--;
       if (token.type !== 'text' || linkDepth) { output.push(token); continue; }
       let at = 0;
-      for (const match of token.content.matchAll(/\[((?:\d{1,3}:)?\d{1,2}:[0-5]\d)\]/g)) {
-        const parts = match[1].split(':').map(Number);
-        if (parts.length === 3 && parts[1] > 59) continue;
+      for (const match of timeCitations(token.content)) {
         if (match.index > at) {
           const before = new token.constructor('text','',0);
           before.content = token.content.slice(at,match.index); output.push(before);
         }
         const cite = new token.constructor('time_citation','button',0);
-        cite.content = match[1]; cite.meta = {seconds:parts.reduce((a,b)=>a*60+b,0)};
-        output.push(cite); at = match.index + match[0].length;
+        cite.content = match.content; cite.meta = {seconds:match.seconds,endSeconds:match.endSeconds};
+        output.push(cite); at = match.index + match.length;
       }
       if (!at) output.push(token);
       else if (at < token.content.length) {
@@ -93,7 +92,7 @@ md.core.ruler.after('inline','time_citations',state => {
 });
 md.renderer.rules.time_citation = (tokens,index) => {
   const token = tokens[index];
-  return `<button type="button" class="citation" data-action="cite" data-time="${token.meta.seconds}" aria-label="定位文稿 ${token.content}">${token.content}</button>`;
+  return `<button type="button" class="citation" data-action="cite" data-time="${token.meta.seconds}" aria-label="定位文稿 ${esc(token.content)}">${esc(token.content)}</button>`;
 };
 
 // 图文排版只读取语义 token，与阅读区共用安全/中文强调规则。
