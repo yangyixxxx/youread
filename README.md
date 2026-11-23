@@ -20,10 +20,10 @@
 
 - [浏览应用源码 / Browse source](newmax-apps/app-f73ecc67-75cb-4381-b4ea-e829470dba1b/)
 - [应用原始文档 / App documentation](newmax-apps/app-f73ecc67-75cb-4381-b4ea-e829470dba1b/README.md)
-- 版本 / Version: 1\.0\.2
+- 版本 / Version: 1\.0\.0
 - NewMax runtime: ^1\.0\.0
 - 权限 / Permissions: ai\.chat, ai\.stream, data\.kv, files\.appData, notifications, desktopShortcut
-- [本次发布 / Release](https://github.com/yangyixxxx/youread/releases/tag/app-bf2973da-20e7-40b2-84b5-dab567a1cded)
+- [本次发布 / Release](https://github.com/yangyixxxx/youread/releases/tag/app-12bff077-5e86-4be3-92a9-d3ee83a29c34)
 
 ## 安装 / Install
 
@@ -33,7 +33,7 @@
 4. 检查来源与权限后，点击「信任并安装」。 / Review the publisher and permissions, then choose Trust and install.
 
 ```text
-NEWMAX-APP:1:yangyixxxx/youread/app-bf2973da-20e7-40b2-84b5-dab567a1cded:af468b99917c232b2391ccb83c199e77c6b378b7bd0517f38eadc72a454116d8
+NEWMAX-APP:1:yangyixxxx/youread/app-12bff077-5e86-4be3-92a9-d3ee83a29c34:a2687cb331d4b58aefebcf43d8f708dc8bab0e2b7084e87596c8d90306f2e329
 ```
 
 无需 GitHub 登录；安装后需手动打开应用。口令对应此版本，旧口令不会自动升级。
