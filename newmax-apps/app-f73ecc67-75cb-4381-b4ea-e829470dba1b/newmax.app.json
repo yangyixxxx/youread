@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "id": "app-f73ecc67-75cb-4381-b4ea-e829470dba1b",
   "name": "映读",
-  "icon": "symbol:savings:moss",
-  "version": "0.1.0",
+  "icon": "symbol:live_tv:clay",
+  "version": "1.0.2",
   "description": "订阅 YouTube 频道，将视频字幕变成可阅读、可解析、可对话的学习资料。",
   "standard": {
     "id": "newmax.local-app",
@@ -89,9 +89,9 @@
     {
       "surface": "newmax.sidebar",
       "title": "映读",
-      "icon": "symbol:savings:moss"
+      "icon": "symbol:live_tv:clay"
     }
   ],
   "createdAt": "2026-10-14T02:08:47.945Z",
-  "updatedAt": "2026-11-06T03:27:59.404Z"
+  "updatedAt": "2026-11-22T21:43:05.112Z"
 }
